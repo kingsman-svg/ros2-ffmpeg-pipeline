@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>video_pipeline</name>
+  <version>0.1.0</version>
+  <description>A ROS 2 video pipeline built with FFmpeg.</description>
+  <maintainer email="maintainer@example.com">Project Maintainer</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <build_depend>pkg-config</build_depend>
+  <depend>rclcpp</depend>
+  <depend>ffmpeg</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
