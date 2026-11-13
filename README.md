@@ -1,6 +1,6 @@
 # ROS 2 FFmpeg Video Pipeline
 
-当前实现了音视频文件读取、解码、H.264 视频编码、视频像素格式转换和音频重采样的基础封装。
+当前实现了音视频文件读取、解码、H.264 视频编码、视频像素格式转换和音频重采样的基础封装。视频发布节点可以把文件解码为 RGB 图像并发布到 ROS 2 话题。
 
 当前开发容器运行 ROS 2 Humble。构建：
 
@@ -9,17 +9,42 @@ cd /workspaces/ros2/ffmpeg_pipline_ws
 source /opt/ros/humble/setup.bash
 colcon build --packages-select video_pipeline
 source install/setup.bash
-ros2 run video_pipeline video_pipeline_node
 ~~~
 
-节点启动后按 Ctrl+C 停止。
-
-后续开发使用 FFmpeg。若重建容器，需要重新安装开发依赖：
+若重建容器，需要安装开发依赖：
 
 ~~~bash
 apt-get update
-apt-get install -y --no-install-recommends ffmpeg libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev pkg-config
+apt-get install -y --no-install-recommends ros-humble-sensor-msgs ffmpeg libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev pkg-config
 ~~~
+
+## 发布视频文件
+
+在容器里的第一个终端生成测试视频并启动节点：
+
+~~~bash
+ffmpeg -y -f lavfi -i 'testsrc2=size=162x120:rate=10:duration=30' \
+  -c:v mpeg4 /tmp/video_publisher_demo.mp4
+ros2 run video_pipeline video_pipeline_node --ros-args \
+  -p input_path:=/tmp/video_publisher_demo.mp4 -p fps:=10.0
+~~~
+
+`input_path` 是容器内的文件路径。`fps` 是固定发布帧率，默认 `30.0`，可以按测试文件的帧率设置。节点默认发布到 `/video/image_raw`，消息类型为 `sensor_msgs/msg/Image`，编码为 `rgb8`。`header.stamp` 记录节点处理这帧图像时的 ROS 时间。文件读完并排空解码器后，节点自动退出。
+
+在同一容器的第二个终端查看话题和消息：
+
+~~~bash
+source /opt/ros/humble/setup.bash
+source /workspaces/ros2/ffmpeg_pipline_ws/install/setup.bash
+ros2 topic list -t
+ros2 topic info /video/image_raw --verbose
+cat "$(ros2 pkg prefix --share sensor_msgs)/msg/Image.msg"
+ros2 topic echo /video/image_raw --once --no-arr
+ros2 topic echo /video/image_raw --once --truncate-length 24
+ros2 topic hz /video/image_raw
+~~~
+
+`Image.msg` 给出消息字段定义，`echo` 查看实际收到的帧。`--no-arr` 省略像素数组，`--truncate-length` 让终端只显示一部分像素字节。使用示例视频时，应看到 `width: 162`、`height: 120`、`encoding: rgb8`、`step: 486`，接收频率约为 10 Hz。`topic hz` 按 Ctrl+C 结束。
 
 ## 封装类
 

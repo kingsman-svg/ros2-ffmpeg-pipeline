@@ -5,6 +5,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
   libavformat libavcodec libavutil libswscale libswresample
@@ -42,7 +44,8 @@ set_target_properties(ffmpeg_audio_probe PROPERTIES
 )
 
 add_executable(video_pipeline_node src/video_pipeline_node.cpp)
-ament_target_dependencies(video_pipeline_node rclcpp)
+ament_target_dependencies(video_pipeline_node rclcpp rcl_interfaces sensor_msgs)
+target_link_libraries(video_pipeline_node ffmpeg_video)
 set_target_properties(video_pipeline_node PROPERTIES
   CXX_STANDARD 14
   CXX_STANDARD_REQUIRED YES
