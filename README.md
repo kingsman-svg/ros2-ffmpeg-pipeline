@@ -1,13 +1,13 @@
 # ROS 2 FFmpeg Video Pipeline
 
-当前实现了音视频文件读取、解码、H.264 视频编码、视频像素格式转换和音频重采样的基础封装。视频发布节点可以把文件解码为 RGB 图像并发布到 ROS 2 话题。
+当前实现了音视频文件读取、解码、H.264 视频编码、视频像素格式转换和音频重采样的基础封装。视频发布节点把文件解码为 RGB 图像，H.264 编码节点订阅图像并发布压缩数据。
 
 当前开发容器运行 ROS 2 Humble。构建：
 
 ~~~bash
 cd /workspaces/ros2/ffmpeg_pipline_ws
 source /opt/ros/humble/setup.bash
-colcon build --packages-select video_pipeline
+colcon build --packages-up-to video_pipeline
 source install/setup.bash
 ~~~
 
@@ -15,7 +15,8 @@ source install/setup.bash
 
 ~~~bash
 apt-get update
-apt-get install -y --no-install-recommends ros-humble-sensor-msgs ffmpeg libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev pkg-config
+apt-get install -y --no-install-recommends ros-humble-sensor-msgs ros-humble-rosidl-default-generators \
+  ffmpeg libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev pkg-config
 ~~~
 
 ## 发布视频文件
@@ -46,6 +47,31 @@ ros2 topic hz /video/image_raw
 
 `Image.msg` 给出消息字段定义，`echo` 查看实际收到的帧。`--no-arr` 省略像素数组，`--truncate-length` 让终端只显示一部分像素字节。使用示例视频时，应看到 `width: 162`、`height: 120`、`encoding: rgb8`、`step: 486`，接收频率约为 10 Hz。`topic hz` 按 Ctrl+C 结束。
 
+## 发布 H.264 数据
+
+先在容器中启动编码节点，再运行上一节的视频发布命令。每个终端都需要加载 ROS 2 和工作空间环境。
+
+~~~bash
+source /opt/ros/humble/setup.bash
+source /workspaces/ros2/ffmpeg_pipline_ws/install/setup.bash
+ros2 run video_pipeline h264_encoder_node --ros-args -p fps:=10 -p bit_rate:=2000000
+~~~
+
+编码端的 `fps` 使用整数，示例与视频发布端的 `10.0` 对应。`bit_rate` 单位为 bit/s。编码节点从 `/video/image_raw` 接收固定尺寸的 `rgb8` 图像，将其转为 YUV420P，再通过 `libx264` 编码。输入宽高均须为偶数。图像和编码包使用可靠 QoS。一次运行处理一个文件，编码端需要在源节点发布第一帧前完成订阅。
+
+发布期间，在另一个容器终端查看自定义消息、关键帧标记和带宽。
+
+~~~bash
+source /opt/ros/humble/setup.bash
+source /workspaces/ros2/ffmpeg_pipline_ws/install/setup.bash
+ros2 topic info /video/h264 --verbose
+ros2 interface show video_pipeline_msgs/msg/H264Packet
+ros2 topic echo /video/h264 --once --no-arr
+ros2 topic bw /video/h264
+~~~
+
+`/video/h264` 的每条数据消息包含一个 Annex B 编码包及对应输入图像的 ROS 头部。编码时间戳 PTS 从 0 开始，单位为 `1 / fps` 秒。源节点读完文件后，通过 `/video/end_of_stream` 发送输入帧数。编码节点等这些帧处理完，排出缓冲中的编码包，再在 `/video/h264` 发布 `end_of_stream: true` 并退出。结束标记的 `data` 为空。
+
 ## 封装类
 
 - `MediaReader`：使用 `libavformat` 打开文件并读取音频或视频 Packet。
@@ -75,7 +101,7 @@ ffmpeg -f lavfi -i 'sine=frequency=440:sample_rate=44100:duration=1' -c:a pcm_s1
 
 ~~~bash
 source /opt/ros/humble/setup.bash
-colcon build --packages-select video_pipeline
+colcon build --packages-up-to video_pipeline
 source install/setup.bash
 ros2 run video_pipeline ffmpeg_video_probe /tmp/video_pipeline_test.mp4
 ros2 run video_pipeline ffmpeg_audio_probe /tmp/video_pipeline_test.wav

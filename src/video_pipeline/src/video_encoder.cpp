@@ -2,6 +2,10 @@
 
 #include <cerrno>
 
+extern "C" {
+#include <libavutil/opt.h>
+}
+
 namespace video_pipeline
 {
 
@@ -50,6 +54,14 @@ int VideoEncoder::open(const VideoEncoderConfig & config)
   codec_context_->pix_fmt = config.pixel_format;
   if (config.global_header) {
     codec_context_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+  }
+  if (!config.tune.empty()) {
+    const int result = av_opt_set(
+      codec_context_, "tune", config.tune.c_str(), AV_OPT_SEARCH_CHILDREN);
+    if (result < 0) {
+      close();
+      return result;
+    }
   }
 
   const int result = avcodec_open2(codec_context_, codec, nullptr);

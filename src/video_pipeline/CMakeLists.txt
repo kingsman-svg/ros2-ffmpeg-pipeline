@@ -7,6 +7,8 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(video_pipeline_msgs REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
   libavformat libavcodec libavutil libswscale libswresample
@@ -44,7 +46,7 @@ set_target_properties(ffmpeg_audio_probe PROPERTIES
 )
 
 add_executable(video_pipeline_node src/video_pipeline_node.cpp)
-ament_target_dependencies(video_pipeline_node rclcpp rcl_interfaces sensor_msgs)
+ament_target_dependencies(video_pipeline_node rclcpp rcl_interfaces sensor_msgs std_msgs)
 target_link_libraries(video_pipeline_node ffmpeg_video)
 set_target_properties(video_pipeline_node PROPERTIES
   CXX_STANDARD 14
@@ -52,7 +54,16 @@ set_target_properties(video_pipeline_node PROPERTIES
   CXX_EXTENSIONS NO
 )
 
-install(TARGETS video_pipeline_node ffmpeg_video_probe ffmpeg_audio_probe
+add_executable(h264_encoder_node src/h264_encoder_node.cpp)
+ament_target_dependencies(h264_encoder_node rclcpp rcl_interfaces sensor_msgs std_msgs video_pipeline_msgs)
+target_link_libraries(h264_encoder_node ffmpeg_video)
+set_target_properties(h264_encoder_node PROPERTIES
+  CXX_STANDARD 14
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+
+install(TARGETS video_pipeline_node h264_encoder_node ffmpeg_video_probe ffmpeg_audio_probe
   DESTINATION lib/${PROJECT_NAME}
 )
 

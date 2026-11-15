@@ -22,6 +22,7 @@ struct VideoEncoderConfig
   AVPixelFormat pixel_format = AV_PIX_FMT_YUV420P;
   bool global_header = false;
   std::string encoder_name;
+  std::string tune;
 };
 
 class VideoEncoder

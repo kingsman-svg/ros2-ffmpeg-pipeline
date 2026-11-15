@@ -8,7 +8,6 @@
 #include <string>
 
 extern "C" {
-#include <libavutil/error.h>
 #include <libavutil/imgutils.h>
 }
 
@@ -16,7 +15,9 @@ extern "C" {
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/image_encodings.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "std_msgs/msg/u_int64.hpp"
 
+#include "ffmpeg_resources.h"
 #include "video_pipeline/image_converter.h"
 #include "video_pipeline/media_decoder.h"
 #include "video_pipeline/media_reader.h"
@@ -24,28 +25,9 @@ extern "C" {
 namespace
 {
 
-struct PacketDeleter
-{
-  void operator()(AVPacket * packet) const
-  {
-    av_packet_free(&packet);
-  }
-};
-
-struct FrameDeleter
-{
-  void operator()(AVFrame * frame) const
-  {
-    av_frame_free(&frame);
-  }
-};
-
-std::runtime_error ffmpeg_error(const std::string & action, int error)
-{
-  char message[AV_ERROR_MAX_STRING_SIZE] = {};
-  av_strerror(error, message, sizeof(message));
-  return std::runtime_error(action + "：" + message);
-}
+using video_pipeline::ffmpeg_error;
+using video_pipeline::FrameDeleter;
+using video_pipeline::PacketDeleter;
 
 class VideoPipelineNode : public rclcpp::Node
 {
@@ -80,7 +62,8 @@ public:
       throw ffmpeg_error("初始化视频解码器失败", result);
     }
 
-    publisher_ = create_publisher<sensor_msgs::msg::Image>("video/image_raw", rclcpp::SensorDataQoS());
+    publisher_ = create_publisher<sensor_msgs::msg::Image>("video/image_raw", rclcpp::QoS(30));
+    end_publisher_ = create_publisher<std_msgs::msg::UInt64>("video/end_of_stream", rclcpp::QoS(1));
     const Nanoseconds period(static_cast<Nanoseconds::rep>(period_ns));
     timer_ = create_wall_timer(period, [this]() {publish_next_frame();});
     RCLCPP_INFO_STREAM(
@@ -121,6 +104,20 @@ private:
   {
     if (!read_next_frame()) {
       if (rclcpp::ok()) {
+        // 退出前等待可靠订阅端确认最后的图像和结束通知。
+        const auto ack_timeout = std::chrono::seconds(2);
+        if (!publisher_->wait_for_all_acked(ack_timeout)) {
+          RCLCPP_WARN(get_logger(), "等待图像传输确认超时");
+        }
+        if (!rclcpp::ok()) {
+          return;
+        }
+        std_msgs::msg::UInt64 stream_end;
+        stream_end.data = published_frames_;
+        end_publisher_->publish(stream_end);
+        if (!end_publisher_->wait_for_all_acked(ack_timeout)) {
+          RCLCPP_WARN(get_logger(), "等待结束通知确认超时");
+        }
         RCLCPP_INFO_STREAM(get_logger(), "视频发布结束，共发布 " << published_frames_ << " 帧");
         rclcpp::shutdown();
       }
@@ -169,6 +166,7 @@ private:
   std::unique_ptr<AVFrame, FrameDeleter> rgb_frame_;
   std::uint64_t published_frames_ = 0;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher_;
+  rclcpp::Publisher<std_msgs::msg::UInt64>::SharedPtr end_publisher_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 
