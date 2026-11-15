@@ -20,7 +20,7 @@ extern "C" {
 #include "std_msgs/msg/header.hpp"
 #include "std_msgs/msg/u_int64.hpp"
 
-#include "ffmpeg_resources.h"
+#include "video_pipeline/ffmpeg_resources.h"
 #include "video_pipeline/image_converter.h"
 #include "video_pipeline/video_encoder.h"
 #include "video_pipeline_msgs/msg/h264_packet.hpp"

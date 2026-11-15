@@ -17,7 +17,7 @@ extern "C" {
 #include "sensor_msgs/msg/image.hpp"
 #include "std_msgs/msg/u_int64.hpp"
 
-#include "ffmpeg_resources.h"
+#include "video_pipeline/ffmpeg_resources.h"
 #include "video_pipeline/image_converter.h"
 #include "video_pipeline/media_decoder.h"
 #include "video_pipeline/media_reader.h"

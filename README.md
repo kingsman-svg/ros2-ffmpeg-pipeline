@@ -80,7 +80,7 @@ ros2 topic bw /video/h264
 - `ImageConverter`：使用 `libswscale` 转换视频像素格式。
 - `AudioResampler`：使用 `libswresample` 转换采样率、采样格式和声道布局。
 
-头文件位于 `src/video_pipeline/include/video_pipeline/`，实现在 `src/video_pipeline/src/`。封装库目前供本包内部使用，尚未导出为其他 ROS 2 包可直接依赖的库。
+在 `video_pipeline` 包内，ROS 2 节点源码位于 `nodes/`，FFmpeg 封装的实现和验证程序位于 `src/`，头文件位于 `include/video_pipeline/`。封装库目前供本包内部使用，尚未导出为其他 ROS 2 包可直接依赖的库。
 
 FFmpeg 封装和示例程序强制使用 C++11。ROS 2 Humble 的 `rclcpp` 头文件依赖 C++14，因此已有的 ROS 节点单独使用 C++14。
 
