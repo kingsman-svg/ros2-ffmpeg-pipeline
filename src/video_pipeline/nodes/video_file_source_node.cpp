@@ -9,6 +9,7 @@
 #include "rcl_interfaces/msg/parameter_descriptor.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/header.hpp"
 #include "std_msgs/msg/u_int64.hpp"
 
@@ -36,6 +37,7 @@ public:
     startup_parameter.read_only = true;
     const auto input_path = declare_parameter<std::string>("input_path", "", startup_parameter);
     const double fps = declare_parameter<double>("fps", 30.0, startup_parameter);
+    waiting_for_pipeline_ = declare_parameter<bool>("wait_for_pipeline", false, startup_parameter);
     if (input_path.empty()) {
       throw std::invalid_argument("请通过 input_path 参数指定视频文件路径");
     }
@@ -60,6 +62,13 @@ public:
 
     publisher_ = create_publisher<sensor_msgs::msg::Image>("video/image_raw", rclcpp::QoS(30));
     end_publisher_ = create_publisher<std_msgs::msg::UInt64>("video/end_of_stream", rclcpp::QoS(1));
+    if (waiting_for_pipeline_) {
+      decoder_ready_subscription_ = create_subscription<std_msgs::msg::Empty>(
+        "video/decoder_ready", rclcpp::QoS(1).transient_local(),
+        [this](std_msgs::msg::Empty::ConstSharedPtr) {decoder_ready_ = true;});
+      startup_deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+      RCLCPP_INFO(get_logger(), "等待编码和解码链路就绪");
+    }
     const Nanoseconds period(static_cast<Nanoseconds::rep>(period_ns));
     timer_ = create_wall_timer(period, [this]() {publish_next_frame();});
     RCLCPP_INFO_STREAM(
@@ -98,6 +107,18 @@ private:
 
   void publish_next_frame()
   {
+    if (waiting_for_pipeline_) {
+      if (!decoder_ready_ || publisher_->get_subscription_count() == 0 ||
+        end_publisher_->get_subscription_count() == 0)
+      {
+        if (std::chrono::steady_clock::now() >= startup_deadline_) {
+          throw std::runtime_error("等待图像、结束通知或 H.264 链路就绪超时");
+        }
+        return;
+      }
+      waiting_for_pipeline_ = false;
+      RCLCPP_INFO(get_logger(), "视频链路已就绪，开始发布图像");
+    }
     if (!read_next_frame()) {
       if (rclcpp::ok()) {
         // 退出前等待可靠订阅端确认最后的图像和结束通知。
@@ -141,6 +162,10 @@ private:
   std::uint64_t published_frames_ = 0;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher_;
   rclcpp::Publisher<std_msgs::msg::UInt64>::SharedPtr end_publisher_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr decoder_ready_subscription_;
+  bool waiting_for_pipeline_ = false;
+  bool decoder_ready_ = false;
+  std::chrono::steady_clock::time_point startup_deadline_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

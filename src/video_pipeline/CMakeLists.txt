@@ -77,4 +77,6 @@ install(TARGETS video_file_source_node h264_encoder_node h264_decoder_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+
 ament_package()

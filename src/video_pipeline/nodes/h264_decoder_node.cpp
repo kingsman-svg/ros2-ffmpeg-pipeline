@@ -11,6 +11,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/header.hpp"
 
 #include "video_pipeline/ffmpeg_resources.h"
@@ -59,6 +60,17 @@ public:
     subscription_ = create_subscription<H264Packet>(
       "video/h264", rclcpp::QoS(30),
       [this](H264Packet::ConstSharedPtr message) {decode_packet(*message);});
+    if (declare_parameter<bool>("announce_ready", false)) {
+      // 保留就绪消息，文件源稍后启动也能收到。
+      ready_publisher_ = create_publisher<std_msgs::msg::Empty>(
+        "video/decoder_ready", rclcpp::QoS(1).transient_local());
+      ready_timer_ = create_wall_timer(std::chrono::milliseconds(100), [this]() {
+        if (subscription_->get_publisher_count() > 0) {
+          ready_publisher_->publish(std_msgs::msg::Empty{});
+          ready_timer_->cancel();
+        }
+      });
+    }
     RCLCPP_INFO_STREAM(
       get_logger(), "等待 " << subscription_->get_topic_name()
                              << "，解码图像输出到 " << publisher_->get_topic_name());
@@ -164,6 +176,8 @@ private:
   std::uint64_t published_frames_ = 0;
   rclcpp::Publisher<Image>::SharedPtr publisher_;
   rclcpp::Subscription<H264Packet>::SharedPtr subscription_;
+  rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr ready_publisher_;
+  rclcpp::TimerBase::SharedPtr ready_timer_;
 };
 
 }  // 匿名命名空间

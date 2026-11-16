@@ -15,9 +15,23 @@ source install/setup.bash
 
 ~~~bash
 apt-get update
-apt-get install -y --no-install-recommends ros-humble-sensor-msgs ros-humble-rosidl-default-generators \
+apt-get install -y --no-install-recommends ros-humble-sensor-msgs \
+  ros-humble-rosidl-default-generators ros-humble-ros2launch \
   ffmpeg libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev pkg-config
 ~~~
+
+## 一键运行视频链路
+
+在容器中生成示例视频，再启动文件源、编码和解码三个节点。
+
+~~~bash
+ffmpeg -y -f lavfi -i 'testsrc2=size=162x120:rate=10:duration=30' \
+  -c:v mpeg4 /tmp/video_publisher_demo.mp4
+ros2 launch video_pipeline video_pipeline.launch.py \
+  input_path:=/tmp/video_publisher_demo.mp4 fps:=10 bit_rate:=2000000
+~~~
+
+`input_path` 必填。`fps` 是用于发布和编码的正整数帧率，默认 `30`。`bit_rate` 是编码目标码率，默认 `2000000` bit/s。文件源等图像、结束通知和 H.264 链路就绪后才开始发布。视频播完后，三个节点会依次排出缓冲数据并退出。
 
 ## 发布视频文件
 
