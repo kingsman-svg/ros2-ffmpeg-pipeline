@@ -1,6 +1,6 @@
 # ROS 2 FFmpeg Video Pipeline
 
-当前实现了音视频文件读取、解码、H.264 视频编码、视频像素格式转换和音频重采样的基础封装。视频发布节点把文件解码为 RGB 图像，H.264 编码节点订阅图像并发布压缩数据。
+当前实现了音视频文件读取、解码、H.264 视频编码、视频像素格式转换和音频重采样的基础封装。视频文件经发布节点输出 RGB 图像，编码节点将图像压缩为 H.264，解码节点再输出 RGB 图像。
 
 当前开发容器运行 ROS 2 Humble。构建：
 
@@ -71,6 +71,28 @@ ros2 topic bw /video/h264
 ~~~
 
 `/video/h264` 的每条数据消息包含一个 Annex B 编码包及对应输入图像的 ROS 头部。编码时间戳 PTS 从 0 开始，单位为 `1 / fps` 秒。源节点读完文件后，通过 `/video/end_of_stream` 发送输入帧数。编码节点等这些帧处理完，排出缓冲中的编码包，再在 `/video/h264` 发布 `end_of_stream: true` 并退出。结束标记的 `data` 为空。
+
+## 解码 H.264 数据
+
+在容器中启动解码节点，再按上面的步骤依次启动编码节点和视频发布节点。每个终端都需要加载 ROS 2 和工作空间环境。
+
+~~~bash
+source /opt/ros/humble/setup.bash
+source /workspaces/ros2/ffmpeg_pipline_ws/install/setup.bash
+ros2 run video_pipeline h264_decoder_node
+~~~
+
+解码节点订阅 `/video/h264`，从关键帧开始解码，将输出帧转成 `rgb8` 并发布到 `/video/decoded_image`。输出类型为 `sensor_msgs/msg/Image`，保留原图像的 ROS 时间戳和 `frame_id`。收到 `end_of_stream` 后，节点先发布解码器中剩余的帧，再打印发布帧数并退出。
+
+在播完前，用另一个已加载环境的终端运行以下命令查看图像和帧率。
+
+~~~bash
+ros2 topic info /video/decoded_image --verbose
+ros2 topic echo /video/decoded_image --once --no-arr
+ros2 topic hz /video/decoded_image
+~~~
+
+对照 `/video/image_raw` 和 `/video/decoded_image`，可以检查宽高、帧率和 ROS 时间戳。H.264 采用有损编码，解码图像的像素值可能和源图像不同。
 
 ## 封装类
 

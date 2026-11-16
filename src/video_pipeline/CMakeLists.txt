@@ -63,7 +63,17 @@ set_target_properties(h264_encoder_node PROPERTIES
   CXX_EXTENSIONS NO
 )
 
-install(TARGETS video_pipeline_node h264_encoder_node ffmpeg_video_probe ffmpeg_audio_probe
+add_executable(h264_decoder_node nodes/h264_decoder_node.cpp)
+ament_target_dependencies(h264_decoder_node rclcpp sensor_msgs std_msgs video_pipeline_msgs)
+target_link_libraries(h264_decoder_node ffmpeg_video)
+set_target_properties(h264_decoder_node PROPERTIES
+  CXX_STANDARD 14
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+
+install(TARGETS video_pipeline_node h264_encoder_node h264_decoder_node
+  ffmpeg_video_probe ffmpeg_audio_probe
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -1,26 +1,22 @@
 #include <cerrno>
 #include <chrono>
-#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <memory>
 #include <stdexcept>
 #include <string>
 
-extern "C" {
-#include <libavutil/imgutils.h>
-}
-
 #include "rcl_interfaces/msg/parameter_descriptor.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "sensor_msgs/image_encodings.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "std_msgs/msg/header.hpp"
 #include "std_msgs/msg/u_int64.hpp"
 
 #include "video_pipeline/ffmpeg_resources.h"
 #include "video_pipeline/image_converter.h"
 #include "video_pipeline/media_decoder.h"
 #include "video_pipeline/media_reader.h"
+#include "video_pipeline/rgb_image_message.h"
 
 namespace
 {
@@ -129,32 +125,10 @@ private:
     if (result < 0) {
       throw ffmpeg_error("转换 RGB 图像失败", result);
     }
-    const int width = rgb_frame_->width;
-    const int height = rgb_frame_->height;
-    const int image_size = av_image_get_buffer_size(AV_PIX_FMT_RGB24, width, height, 1);
-    if (image_size < 0) {
-      throw ffmpeg_error("计算 RGB 图像大小失败", image_size);
-    }
-
-    sensor_msgs::msg::Image image;
-    image.header.stamp = stamp;
-    image.header.frame_id = "video_optical_frame";
-    image.width = static_cast<std::uint32_t>(width);
-    image.height = static_cast<std::uint32_t>(height);
-    image.encoding = sensor_msgs::image_encodings::RGB8;
-    image.is_bigendian = 0;
-    image.step = image.width * 3;
-    image.data.resize(static_cast<std::size_t>(image_size));
-
-    // 按源帧的行跨度读取，以 1 字节对齐写入，去掉行末填充。
-    const std::uint8_t * planes[4] = {rgb_frame_->data[0], nullptr, nullptr, nullptr};
-    const int copied = av_image_copy_to_buffer(
-      image.data.data(), image_size, planes, rgb_frame_->linesize, AV_PIX_FMT_RGB24,
-      width, height, 1);
-    if (copied < 0) {
-      throw ffmpeg_error("复制 RGB 图像失败", copied);
-    }
-    publisher_->publish(image);
+    std_msgs::msg::Header header;
+    header.stamp = stamp;
+    header.frame_id = "video_optical_frame";
+    publisher_->publish(video_pipeline::make_rgb_image(*rgb_frame_, header));
     ++published_frames_;
   }
 
