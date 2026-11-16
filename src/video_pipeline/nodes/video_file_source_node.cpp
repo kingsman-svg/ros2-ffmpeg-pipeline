@@ -25,11 +25,11 @@ using video_pipeline::ffmpeg_error;
 using video_pipeline::FrameDeleter;
 using video_pipeline::PacketDeleter;
 
-class VideoPipelineNode : public rclcpp::Node
+class VideoFileSourceNode : public rclcpp::Node
 {
 public:
-  VideoPipelineNode()
-  : Node("video_pipeline"), packet_(av_packet_alloc()),
+  VideoFileSourceNode()
+  : Node("video_file_source"), packet_(av_packet_alloc()),
     decoded_frame_(av_frame_alloc()), rgb_frame_(av_frame_alloc())
   {
     rcl_interfaces::msg::ParameterDescriptor startup_parameter;
@@ -150,10 +150,10 @@ int main(int argc, char * argv[])
 {
   try {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<VideoPipelineNode>();
+    auto node = std::make_shared<VideoFileSourceNode>();
     rclcpp::spin(node);
   } catch (const std::exception & error) {
-    RCLCPP_ERROR(rclcpp::get_logger("video_pipeline"), "%s", error.what());
+    RCLCPP_ERROR(rclcpp::get_logger("video_file_source"), "%s", error.what());
     rclcpp::shutdown();
     return 1;
   }

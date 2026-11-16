@@ -26,7 +26,7 @@ apt-get install -y --no-install-recommends ros-humble-sensor-msgs ros-humble-ros
 ~~~bash
 ffmpeg -y -f lavfi -i 'testsrc2=size=162x120:rate=10:duration=30' \
   -c:v mpeg4 /tmp/video_publisher_demo.mp4
-ros2 run video_pipeline video_pipeline_node --ros-args \
+ros2 run video_pipeline video_file_source_node --ros-args \
   -p input_path:=/tmp/video_publisher_demo.mp4 -p fps:=10.0
 ~~~
 

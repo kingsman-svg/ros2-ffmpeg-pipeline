@@ -45,10 +45,10 @@ set_target_properties(ffmpeg_audio_probe PROPERTIES
   CXX_EXTENSIONS NO
 )
 
-add_executable(video_pipeline_node nodes/video_pipeline_node.cpp)
-ament_target_dependencies(video_pipeline_node rclcpp rcl_interfaces sensor_msgs std_msgs)
-target_link_libraries(video_pipeline_node ffmpeg_video)
-set_target_properties(video_pipeline_node PROPERTIES
+add_executable(video_file_source_node nodes/video_file_source_node.cpp)
+ament_target_dependencies(video_file_source_node rclcpp rcl_interfaces sensor_msgs std_msgs)
+target_link_libraries(video_file_source_node ffmpeg_video)
+set_target_properties(video_file_source_node PROPERTIES
   CXX_STANDARD 14
   CXX_STANDARD_REQUIRED YES
   CXX_EXTENSIONS NO
@@ -72,7 +72,7 @@ set_target_properties(h264_decoder_node PROPERTIES
   CXX_EXTENSIONS NO
 )
 
-install(TARGETS video_pipeline_node h264_encoder_node h264_decoder_node
+install(TARGETS video_file_source_node h264_encoder_node h264_decoder_node
   ffmpeg_video_probe ffmpeg_audio_probe
   DESTINATION lib/${PROJECT_NAME}
 )
