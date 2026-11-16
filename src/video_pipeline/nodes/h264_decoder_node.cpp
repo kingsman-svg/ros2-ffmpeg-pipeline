@@ -8,13 +8,17 @@
 #include <map>
 #include <memory>
 #include <stdexcept>
+#include <thread>
+#include <utility>
 
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "std_msgs/msg/empty.hpp"
 #include "std_msgs/msg/header.hpp"
 
 #include "video_pipeline/ffmpeg_resources.h"
+#include "video_pipeline/h264_packet_queue.h"
 #include "video_pipeline/image_converter.h"
 #include "video_pipeline/media_decoder.h"
 #include "video_pipeline/rgb_image_message.h"
@@ -26,6 +30,7 @@ namespace
 using sensor_msgs::msg::Image;
 using video_pipeline::ffmpeg_error;
 using video_pipeline::FrameDeleter;
+using video_pipeline::H264PacketQueue;
 using video_pipeline::PacketDeleter;
 using video_pipeline_msgs::msg::H264Packet;
 
@@ -39,6 +44,12 @@ public:
     if (!packet_ || !decoded_frame_ || !rgb_frame_) {
       throw std::runtime_error("分配解码数据结构失败");
     }
+
+    rcl_interfaces::msg::ParameterDescriptor startup_parameter;
+    startup_parameter.read_only = true;
+    const auto max_packets = declare_parameter<std::int64_t>("queue_max_packets", 120, startup_parameter);
+    const auto max_bytes = declare_parameter<std::int64_t>("queue_max_bytes", 8 * 1024 * 1024, startup_parameter);
+    decode_queue_ = std::make_unique<H264PacketQueue>("H.264 解码队列", max_packets, max_bytes);
 
     // Annex B 流中的 SPS 和 PPS 会提供宽高等参数，初始化时只需指定编码格式。
     auto free_parameters = [](AVCodecParameters * parameters) {
@@ -59,7 +70,13 @@ public:
     publisher_ = create_publisher<Image>("video/decoded_image", rclcpp::QoS(30));
     subscription_ = create_subscription<H264Packet>(
       "video/h264", rclcpp::QoS(30),
-      [this](H264Packet::ConstSharedPtr message) {decode_packet(*message);});
+      [this](H264Packet::ConstSharedPtr message) {
+        if (message->end_of_stream) {
+          decode_queue_->close();
+          return;
+        }
+        decode_queue_->push(std::move(message));
+      });
     if (declare_parameter<bool>("announce_ready", false)) {
       // 保留就绪消息，文件源稍后启动也能收到。
       ready_publisher_ = create_publisher<std_msgs::msg::Empty>(
@@ -71,18 +88,65 @@ public:
         }
       });
     }
+    stats_timer_ = create_wall_timer(std::chrono::seconds(1), [this]() {
+      RCLCPP_INFO_STREAM(get_logger(), "H.264 解码队列：" << decode_queue_->stats());
+    });
     RCLCPP_INFO_STREAM(
       get_logger(), "等待 " << subscription_->get_topic_name()
                              << "，解码图像输出到 " << publisher_->get_topic_name());
+    decode_thread_ = std::thread([this]() {
+      try {
+        decode_queued_packets();
+      } catch (...) {
+        if (rclcpp::ok()) {
+          decode_error_ = std::current_exception();
+          rclcpp::shutdown();
+        }
+      }
+    });
+  }
+
+  ~H264DecoderNode() override
+  {
+    stop_decode_thread();
+  }
+
+  void check_decode_result()
+  {
+    stop_decode_thread();
+    if (decode_error_) {
+      std::rethrow_exception(decode_error_);
+    }
   }
 
 private:
+  void stop_decode_thread()
+  {
+    if (decode_thread_.joinable()) {
+      decode_queue_->cancel();
+      decode_thread_.join();
+    }
+  }
+
+  void decode_queued_packets()
+  {
+    H264PacketQueue::Packet packet;
+    while (rclcpp::ok()) {
+      const auto result = decode_queue_->wait_pop(packet);
+      if (result == H264PacketQueue::PopResult::Cancelled || !rclcpp::ok()) {
+        return;
+      }
+      if (result == H264PacketQueue::PopResult::Finished) {
+        // 结束标记关闭队列，消费完之前入队的包后再排空解码器。
+        finish_stream();
+        return;
+      }
+      decode_packet(*packet);
+    }
+  }
+
   void decode_packet(const H264Packet & message)
   {
-    if (message.end_of_stream) {
-      finish_stream();
-      return;
-    }
     // 中途加入时从关键帧开始，避免把缺少参考帧的包送给解码器。
     if (waiting_for_key_frame_ && !message.key_frame) {
       return;
@@ -178,6 +242,10 @@ private:
   rclcpp::Subscription<H264Packet>::SharedPtr subscription_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr ready_publisher_;
   rclcpp::TimerBase::SharedPtr ready_timer_;
+  std::unique_ptr<H264PacketQueue> decode_queue_;
+  rclcpp::TimerBase::SharedPtr stats_timer_;
+  std::exception_ptr decode_error_;
+  std::thread decode_thread_;
 };
 
 }  // 匿名命名空间
@@ -188,6 +256,7 @@ int main(int argc, char * argv[])
     rclcpp::init(argc, argv);
     auto node = std::make_shared<H264DecoderNode>();
     rclcpp::spin(node);
+    node->check_decode_result();
   } catch (const std::exception & error) {
     RCLCPP_ERROR(rclcpp::get_logger("h264_decoder"), "%s", error.what());
     rclcpp::shutdown();

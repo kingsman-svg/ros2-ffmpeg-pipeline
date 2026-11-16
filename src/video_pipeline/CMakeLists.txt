@@ -9,6 +9,7 @@ find_package(rcl_interfaces REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(video_pipeline_msgs REQUIRED)
+find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
   libavformat libavcodec libavutil libswscale libswresample
@@ -25,6 +26,16 @@ target_include_directories(ffmpeg_video PUBLIC include)
 target_link_libraries(ffmpeg_video PUBLIC PkgConfig::FFMPEG)
 set_target_properties(ffmpeg_video PROPERTIES
   CXX_STANDARD 11
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+
+add_library(h264_packet_queue STATIC src/h264_packet_queue.cpp)
+target_include_directories(h264_packet_queue PUBLIC include)
+ament_target_dependencies(h264_packet_queue video_pipeline_msgs)
+target_link_libraries(h264_packet_queue Threads::Threads)
+set_target_properties(h264_packet_queue PROPERTIES
+  CXX_STANDARD 14
   CXX_STANDARD_REQUIRED YES
   CXX_EXTENSIONS NO
 )
@@ -56,7 +67,7 @@ set_target_properties(video_file_source_node PROPERTIES
 
 add_executable(h264_encoder_node nodes/h264_encoder_node.cpp)
 ament_target_dependencies(h264_encoder_node rclcpp rcl_interfaces sensor_msgs std_msgs video_pipeline_msgs)
-target_link_libraries(h264_encoder_node ffmpeg_video)
+target_link_libraries(h264_encoder_node ffmpeg_video h264_packet_queue)
 set_target_properties(h264_encoder_node PROPERTIES
   CXX_STANDARD 14
   CXX_STANDARD_REQUIRED YES
@@ -64,8 +75,8 @@ set_target_properties(h264_encoder_node PROPERTIES
 )
 
 add_executable(h264_decoder_node nodes/h264_decoder_node.cpp)
-ament_target_dependencies(h264_decoder_node rclcpp sensor_msgs std_msgs video_pipeline_msgs)
-target_link_libraries(h264_decoder_node ffmpeg_video)
+ament_target_dependencies(h264_decoder_node rclcpp rcl_interfaces sensor_msgs std_msgs video_pipeline_msgs)
+target_link_libraries(h264_decoder_node ffmpeg_video h264_packet_queue)
 set_target_properties(h264_decoder_node PROPERTIES
   CXX_STANDARD 14
   CXX_STANDARD_REQUIRED YES

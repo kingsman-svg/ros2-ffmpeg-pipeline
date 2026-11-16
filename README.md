@@ -108,6 +108,19 @@ ros2 topic hz /video/decoded_image
 
 对照 `/video/image_raw` 和 `/video/decoded_image`，可以检查宽高、帧率和 ROS 时间戳。H.264 采用有损编码，解码图像的像素值可能和源图像不同。
 
+### H.264 发送与解码队列
+
+编码后的数据包先进入发送队列，由发送线程发布到 `/video/h264`。解码节点的订阅回调把收到的包放进解码队列，由解码线程取出并处理。两个应用层队列各自默认最多保留 120 个包和 8 MiB 的 H.264 数据。`ros2 launch` 接受以下参数。
+
+| 参数 | 作用 |
+|---|---|
+| `send_queue_max_packets` | 发送队列包数上限 |
+| `send_queue_max_bytes` | 发送队列数据字节上限 |
+| `decode_queue_max_packets` | 解码队列包数上限 |
+| `decode_queue_max_bytes` | 解码队列数据字节上限 |
+
+单独用 `ros2 run` 启动编码或解码节点时，通过 `queue_max_packets` 和 `queue_max_bytes` 配置该节点的队列。两个节点每秒打印当前包数、数据字节占用及占用率，以及最老包在队列里的等待时间。统计在应用层入队时开始，取出后即结束。达到任一容量上限且无法接收新包时，节点报错退出。正常结束时，两端都先处理完已入队的数据，再发结束标记或排空解码器。
+
 ## 封装类
 
 - `MediaReader`：使用 `libavformat` 打开文件并读取音频或视频 Packet。

@@ -8,6 +8,8 @@
 #include <map>
 #include <memory>
 #include <stdexcept>
+#include <thread>
+#include <utility>
 
 extern "C" {
 #include <libavutil/imgutils.h>
@@ -21,6 +23,7 @@ extern "C" {
 #include "std_msgs/msg/u_int64.hpp"
 
 #include "video_pipeline/ffmpeg_resources.h"
+#include "video_pipeline/h264_packet_queue.h"
 #include "video_pipeline/image_converter.h"
 #include "video_pipeline/video_encoder.h"
 #include "video_pipeline_msgs/msg/h264_packet.hpp"
@@ -32,6 +35,7 @@ using sensor_msgs::msg::Image;
 using std_msgs::msg::UInt64;
 using video_pipeline::ffmpeg_error;
 using video_pipeline::FrameDeleter;
+using video_pipeline::H264PacketQueue;
 using video_pipeline::PacketDeleter;
 using video_pipeline_msgs::msg::H264Packet;
 
@@ -58,6 +62,10 @@ public:
     encoder_config_.encoder_name = "libx264";
     encoder_config_.tune = "zerolatency";
 
+    const auto max_packets = declare_parameter<std::int64_t>("queue_max_packets", 120, startup_parameter);
+    const auto max_bytes = declare_parameter<std::int64_t>("queue_max_bytes", 8 * 1024 * 1024, startup_parameter);
+    send_queue_ = std::make_unique<H264PacketQueue>("H.264 发送队列", max_packets, max_bytes);
+
     publisher_ = create_publisher<H264Packet>("video/h264", rclcpp::QoS(30));
     image_subscription_ = create_subscription<Image>(
       "video/image_raw", rclcpp::QoS(30),
@@ -65,13 +73,74 @@ public:
     end_subscription_ = create_subscription<UInt64>(
       "video/end_of_stream", rclcpp::QoS(1),
       [this](UInt64::ConstSharedPtr stream_end) {on_stream_end(stream_end->data);});
+    stats_timer_ = create_wall_timer(std::chrono::seconds(1), [this]() {
+      RCLCPP_INFO_STREAM(get_logger(), "H.264 发送队列：" << send_queue_->stats());
+    });
 
     RCLCPP_INFO_STREAM(
       get_logger(), "等待 " << image_subscription_->get_topic_name()
                              << "，H.264 输出到 " << publisher_->get_topic_name());
+    send_thread_ = std::thread([this]() {
+      try {
+        send_queued_packets();
+      } catch (...) {
+        if (rclcpp::ok()) {
+          send_error_ = std::current_exception();
+          rclcpp::shutdown();
+        }
+      }
+    });
+  }
+
+  ~H264EncoderNode() override
+  {
+    stop_send_thread();
+  }
+
+  void check_send_result()
+  {
+    stop_send_thread();
+    if (send_error_) {
+      std::rethrow_exception(send_error_);
+    }
   }
 
 private:
+  void stop_send_thread()
+  {
+    if (send_thread_.joinable()) {
+      send_queue_->cancel();
+      send_thread_.join();
+    }
+  }
+
+  void send_queued_packets()
+  {
+    H264PacketQueue::Packet packet;
+    while (rclcpp::ok()) {
+      const auto result = send_queue_->wait_pop(packet);
+      if (result == H264PacketQueue::PopResult::Cancelled || !rclcpp::ok()) {
+        return;
+      }
+      if (result == H264PacketQueue::PopResult::Finished) {
+        break;
+      }
+      publisher_->publish(*packet);
+    }
+    if (!rclcpp::ok()) {
+      return;
+    }
+
+    // 发送线程取完所有编码包后，才在同一话题发送结束标记。
+    H264Packet stream_end;
+    stream_end.end_of_stream = true;
+    publisher_->publish(stream_end);
+    if (!publisher_->wait_for_all_acked(std::chrono::seconds(2))) {
+      RCLCPP_WARN(get_logger(), "等待 H.264 传输确认超时");
+    }
+    rclcpp::shutdown();
+  }
+
   void open_encoder(const Image & image)
   {
     const int result = av_image_check_size(image.width, image.height, 0, nullptr);
@@ -138,14 +207,14 @@ private:
     }
     input_headers_.emplace(next_pts_, image.header);
     ++next_pts_;
-    const int receive_result = publish_packets();
+    const int receive_result = queue_encoded_packets();
     if (receive_result != AVERROR(EAGAIN)) {
       throw ffmpeg_error("读取 H.264 编码包失败", receive_result);
     }
     finish_if_ready();
   }
 
-  int publish_packets()
+  int queue_encoded_packets()
   {
     const AVRational time_base = encoder_.time_base();
     while (true) {
@@ -158,31 +227,34 @@ private:
       if (header == input_headers_.end()) {
         throw std::runtime_error("找不到编码包对应的输入帧");
       }
-      H264Packet message;
-      message.header = header->second;
-      message.pts = packet_->pts;
-      message.dts = packet_->dts;
-      message.time_base_num = time_base.num;
-      message.time_base_den = time_base.den;
-      message.key_frame = (packet_->flags & AV_PKT_FLAG_KEY) != 0;
-      message.data.assign(packet_->data, packet_->data + packet_->size);
-      publisher_->publish(message);
+      auto message = std::make_shared<H264Packet>();
+      message->header = header->second;
+      message->pts = packet_->pts;
+      message->dts = packet_->dts;
+      message->time_base_num = time_base.num;
+      message->time_base_den = time_base.den;
+      message->key_frame = (packet_->flags & AV_PKT_FLAG_KEY) != 0;
+      message->data.assign(packet_->data, packet_->data + packet_->size);
+      send_queue_->push(std::move(message));
       input_headers_.erase(header);
     }
   }
 
   void on_stream_end(std::uint64_t frame_count)
   {
+    if (end_received_) {
+      return;
+    }
     end_received_ = true;
     expected_frames_ = frame_count;
-    finish_if_ready();
-    if (rclcpp::ok() && !end_timer_) {
+    if (static_cast<std::uint64_t>(next_pts_) != expected_frames_) {
       // 两个输入话题独立传输，结束通知可能先于最后几帧进入回调。
       end_timer_ = create_wall_timer(std::chrono::seconds(5), [this]() {
         throw std::runtime_error(
                 "结束通知与收到的帧数不符，请先启动编码节点再启动视频发布节点");
       });
     }
+    finish_if_ready();
   }
 
   void finish_if_ready()
@@ -190,12 +262,15 @@ private:
     if (!end_received_ || static_cast<std::uint64_t>(next_pts_) != expected_frames_) {
       return;
     }
+    if (end_timer_) {
+      end_timer_->cancel();
+    }
     if (next_pts_ > 0) {
       const int result = encoder_.send_frame(nullptr);
       if (result < 0) {
         throw ffmpeg_error("排空 H.264 编码器失败", result);
       }
-      const int receive_result = publish_packets();
+      const int receive_result = queue_encoded_packets();
       if (receive_result != AVERROR_EOF) {
         throw ffmpeg_error("读取剩余 H.264 编码包失败", receive_result);
       }
@@ -204,14 +279,8 @@ private:
       }
     }
 
-    H264Packet stream_end;
-    stream_end.end_of_stream = true;
-    publisher_->publish(stream_end);
-    if (!publisher_->wait_for_all_acked(std::chrono::seconds(2))) {
-      RCLCPP_WARN(get_logger(), "等待 H.264 传输确认超时");
-    }
     RCLCPP_INFO_STREAM(get_logger(), "H.264 编码结束，共处理 " << next_pts_ << " 帧");
-    rclcpp::shutdown();
+    send_queue_->close();
   }
 
   video_pipeline::VideoEncoder encoder_;
@@ -228,6 +297,10 @@ private:
   rclcpp::Subscription<Image>::SharedPtr image_subscription_;
   rclcpp::Subscription<UInt64>::SharedPtr end_subscription_;
   rclcpp::TimerBase::SharedPtr end_timer_;
+  std::unique_ptr<H264PacketQueue> send_queue_;
+  rclcpp::TimerBase::SharedPtr stats_timer_;
+  std::exception_ptr send_error_;
+  std::thread send_thread_;
 };
 
 }  // 匿名命名空间
@@ -238,6 +311,7 @@ int main(int argc, char * argv[])
     rclcpp::init(argc, argv);
     auto node = std::make_shared<H264EncoderNode>();
     rclcpp::spin(node);
+    node->check_send_result();
   } catch (const std::exception & error) {
     RCLCPP_ERROR(rclcpp::get_logger("h264_encoder"), "%s", error.what());
     rclcpp::shutdown();
