@@ -1,4 +1,4 @@
-"""在 ROS 2 容器里验证 H.264 队列积压、排空和容量错误。"""
+"""在 ROS 2 容器里验证 H.264 队列积压、排空、容量错误和反馈。"""
 
 import argparse
 import csv
@@ -26,6 +26,8 @@ FRAME_COUNT = 80
 START_AFTER = 5
 DELAY_COUNT = 18
 DELAY_MS = 220
+FEEDBACK_DROP_START_AFTER = 10
+FEEDBACK_DROP_COUNT = 18
 CASE_TIMEOUT_SECONDS = 35
 
 QUEUE_NAMES = {"send": "发送", "decode": "解码"}
@@ -35,6 +37,7 @@ CASES = (
     "baseline",
     "slow_send",
     "slow_decode",
+    "feedback_gap",
     "send_overflow",
     "decode_overflow",
 )
@@ -43,6 +46,9 @@ QUEUE_SAMPLE = re.compile(
     r"H\.264 (?P<queue>发送|解码)队列：(?P<packets>\d+)/(?P<max_packets>\d+) 包，"
     r"(?P<bytes>\d+)/(?P<max_bytes>\d+) 字节（(?P<byte_usage_pct>[\d.eE+-]+)%），"
     r"最老包等待 (?P<oldest_wait_ms>\d+) ms"
+)
+ENCODER_FEEDBACK = re.compile(
+    r"\[h264_encoder\]: H\.264 解码队列反馈：(?:有效，(?P<packets>\d+)/\d+ 包|已过期)"
 )
 SAMPLE_FIELDS = (
     "case", "timestamp", "queue", "packets", "max_packets", "packet_usage_pct",
@@ -170,6 +176,28 @@ def summarize_queue(samples, queue):
     )
 
 
+def summarize_feedback(log):
+    """从编码端日志验证它实际使用的反馈状态。"""
+    peak_packets = None
+    drained = False
+    expired_after_sample = False
+    recovered = False
+    for match in ENCODER_FEEDBACK.finditer(log):
+        packet_count = match.group("packets")
+        if packet_count is None:
+            if peak_packets is not None:
+                expired_after_sample = True
+            continue
+        packets = int(packet_count)
+        if peak_packets is None or packets > peak_packets:
+            peak_packets = packets
+        if peak_packets > 0 and packets == 0:
+            drained = True
+        if expired_after_sample:
+            recovered = True
+    return peak_packets, drained, recovered
+
+
 def run_case(case, domain_id, video, delay_library, log_path):
     command = [
         "ros2", "launch", "video_pipeline", "video_pipeline.launch.py",
@@ -185,18 +213,31 @@ def run_case(case, domain_id, video, delay_library, log_path):
     )
     slow_queue = None
     overflow_queue = None
+    feedback_gap = case == "feedback_gap"
     if case.startswith("slow_"):
         slow_queue = case.removeprefix("slow_")
+    if slow_queue or feedback_gap:
         preload = str(delay_library)
         if env.get("LD_PRELOAD"):
             preload += ":" + env["LD_PRELOAD"]
         env.update(
             LD_PRELOAD=preload,
-            QUEUE_PRESSURE_TOPIC=DELAY_TOPICS[slow_queue],
-            QUEUE_PRESSURE_START_AFTER=str(START_AFTER),
-            QUEUE_PRESSURE_DELAY_COUNT=str(DELAY_COUNT),
             QUEUE_PRESSURE_DELAY_MS=str(DELAY_MS),
         )
+        if feedback_gap:
+            env.update(
+                QUEUE_PRESSURE_TOPIC="/video/queue_feedback",
+                QUEUE_PRESSURE_START_AFTER=str(FEEDBACK_DROP_START_AFTER),
+                QUEUE_PRESSURE_COUNT=str(FEEDBACK_DROP_COUNT),
+                QUEUE_PRESSURE_DROP="1",
+            )
+        else:
+            env.update(
+                QUEUE_PRESSURE_TOPIC=DELAY_TOPICS[slow_queue],
+                QUEUE_PRESSURE_START_AFTER=str(START_AFTER),
+                QUEUE_PRESSURE_COUNT=str(DELAY_COUNT),
+                QUEUE_PRESSURE_DROP="0",
+            )
     if case.endswith("_overflow"):
         overflow_queue = case.removesuffix("_overflow")
         command.append(f"{overflow_queue}_queue_max_bytes:=1")
@@ -219,6 +260,7 @@ def run_case(case, domain_id, video, delay_library, log_path):
     data_packets = [packet for packet in observer.packets if packet is not None]
     eos_order_ok = observer.packets.count(None) == 1 and observer.packets[-1] is None
     expected_packets = list(enumerate(observer.source_headers))
+    feedback_peak, feedback_drained, feedback_recovered = summarize_feedback(log)
     problems = []
     if exit_code is None:
         problems.append("运行超时")
@@ -235,6 +277,12 @@ def run_case(case, domain_id, video, delay_library, log_path):
             problems.append("H.264 包的 PTS、时间戳或顺序不符")
         if not eos_order_ok:
             problems.append("H.264 结束标记缺失、重复或后面仍有数据包")
+        if feedback_peak is None:
+            problems.append("编码端未收到有效的解码队列反馈")
+        elif slow_queue == "decode" and not feedback_drained:
+            problems.append("编码端未观察到解码队列积压后恢复为空")
+        if feedback_gap and not feedback_recovered:
+            problems.append("编码端未观察到反馈由有效到过期、再恢复有效")
 
     result = {
         "case": case,
@@ -243,6 +291,9 @@ def run_case(case, domain_id, video, delay_library, log_path):
         "encoded_packets": len(data_packets),
         "decoded_frames": len(observer.decoded_headers),
         "eos_order_ok": eos_order_ok,
+        "feedback_peak_packets": feedback_peak,
+        "feedback_drained_after_backlog": feedback_drained,
+        "feedback_expired_then_recovered": feedback_recovered,
     }
     for queue in QUEUE_NAMES:
         stats = summarize_queue(samples, queue)
@@ -263,7 +314,7 @@ def run_case(case, domain_id, video, delay_library, log_path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, help="CSV 和日志目录，默认新建临时目录")
-    parser.add_argument("--domain-id", type=int, default=160, help="起始 ROS 域 ID，连续使用五个域")
+    parser.add_argument("--domain-id", type=int, default=160, help=f"起始 ROS 域 ID，连续使用 {len(CASES)} 个域")
     args = parser.parse_args()
     max_starting_domain = 232 - len(CASES) + 1
     if not 0 <= args.domain_id <= max_starting_domain:
@@ -311,6 +362,10 @@ def main():
             )
             if result["details"]:
                 print(f"  {result['details']}", flush=True)
+            if result["feedback_drained_after_backlog"]:
+                print(f"  编码端看到解码队列从峰值 {result['feedback_peak_packets']} 包恢复为空", flush=True)
+            if result["feedback_expired_then_recovered"]:
+                print("  编码端检测到反馈过期，随后收到新样本", flush=True)
 
     with (output / "runs.csv").open("w", encoding="utf-8", newline="") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=list(results[0]))

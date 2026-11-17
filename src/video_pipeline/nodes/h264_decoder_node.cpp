@@ -23,6 +23,7 @@
 #include "video_pipeline/media_decoder.h"
 #include "video_pipeline/rgb_image_message.h"
 #include "video_pipeline_msgs/msg/h264_packet.hpp"
+#include "video_pipeline_msgs/msg/h264_queue_feedback.hpp"
 
 namespace
 {
@@ -33,6 +34,7 @@ using video_pipeline::FrameDeleter;
 using video_pipeline::H264PacketQueue;
 using video_pipeline::PacketDeleter;
 using video_pipeline_msgs::msg::H264Packet;
+using video_pipeline_msgs::msg::H264QueueFeedback;
 
 class H264DecoderNode : public rclcpp::Node
 {
@@ -77,6 +79,10 @@ public:
         }
         decode_queue_->push(std::move(message));
       });
+    feedback_publisher_ = create_publisher<H264QueueFeedback>(
+      "video/queue_feedback", rclcpp::QoS(1).best_effort().durability_volatile());
+    feedback_timer_ = create_wall_timer(
+      std::chrono::milliseconds(200), [this]() {publish_queue_feedback();});
     if (declare_parameter<bool>("announce_ready", false)) {
       // 保留就绪消息，文件源稍后启动也能收到。
       ready_publisher_ = create_publisher<std_msgs::msg::Empty>(
@@ -120,6 +126,18 @@ public:
   }
 
 private:
+  void publish_queue_feedback()
+  {
+    const auto stats = decode_queue_->stats();
+    H264QueueFeedback feedback;
+    feedback.packet_count = stats.packet_count;
+    feedback.max_packets = stats.max_packets;
+    feedback.byte_count = stats.byte_count;
+    feedback.max_bytes = stats.max_bytes;
+    feedback.oldest_wait_ms = static_cast<std::uint64_t>(stats.oldest_wait.count());
+    feedback_publisher_->publish(feedback);
+  }
+
   void stop_decode_thread()
   {
     if (decode_thread_.joinable()) {
@@ -240,6 +258,8 @@ private:
   std::uint64_t published_frames_ = 0;
   rclcpp::Publisher<Image>::SharedPtr publisher_;
   rclcpp::Subscription<H264Packet>::SharedPtr subscription_;
+  rclcpp::Publisher<H264QueueFeedback>::SharedPtr feedback_publisher_;
+  rclcpp::TimerBase::SharedPtr feedback_timer_;
   rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr ready_publisher_;
   rclcpp::TimerBase::SharedPtr ready_timer_;
   std::unique_ptr<H264PacketQueue> decode_queue_;

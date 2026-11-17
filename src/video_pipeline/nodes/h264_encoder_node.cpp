@@ -27,6 +27,7 @@ extern "C" {
 #include "video_pipeline/image_converter.h"
 #include "video_pipeline/video_encoder.h"
 #include "video_pipeline_msgs/msg/h264_packet.hpp"
+#include "video_pipeline_msgs/msg/h264_queue_feedback.hpp"
 
 namespace
 {
@@ -38,6 +39,9 @@ using video_pipeline::FrameDeleter;
 using video_pipeline::H264PacketQueue;
 using video_pipeline::PacketDeleter;
 using video_pipeline_msgs::msg::H264Packet;
+using video_pipeline_msgs::msg::H264QueueFeedback;
+
+constexpr std::chrono::seconds kQueueFeedbackTimeout{1};
 
 class H264EncoderNode : public rclcpp::Node
 {
@@ -73,9 +77,13 @@ public:
     end_subscription_ = create_subscription<UInt64>(
       "video/end_of_stream", rclcpp::QoS(1),
       [this](UInt64::ConstSharedPtr stream_end) {on_stream_end(stream_end->data);});
-    stats_timer_ = create_wall_timer(std::chrono::seconds(1), [this]() {
-      RCLCPP_INFO_STREAM(get_logger(), "H.264 发送队列：" << send_queue_->stats());
-    });
+    feedback_subscription_ = create_subscription<H264QueueFeedback>(
+      "video/queue_feedback", rclcpp::QoS(1).best_effort().durability_volatile(),
+      [this](H264QueueFeedback::ConstSharedPtr feedback) {
+        latest_decode_feedback_ = std::move(feedback);
+        decode_feedback_received_at_ = std::chrono::steady_clock::now();
+      });
+    stats_timer_ = create_wall_timer(std::chrono::seconds(1), [this]() {log_queue_stats();});
 
     RCLCPP_INFO_STREAM(
       get_logger(), "等待 " << image_subscription_->get_topic_name()
@@ -106,6 +114,29 @@ public:
   }
 
 private:
+  void log_queue_stats()
+  {
+    RCLCPP_INFO_STREAM(get_logger(), "H.264 发送队列：" << send_queue_->stats());
+    if (!latest_decode_feedback_) {
+      RCLCPP_INFO(get_logger(), "H.264 解码队列反馈：尚未收到");
+      return;
+    }
+
+    // 用编码节点的单调时钟计算接收间隔，允许两个节点跨主机运行。
+    const auto age = std::chrono::steady_clock::now() - decode_feedback_received_at_;
+    const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(age).count();
+    if (age >= kQueueFeedbackTimeout) {
+      RCLCPP_INFO_STREAM(get_logger(), "H.264 解码队列反馈：已过期，接收于 " << age_ms << " ms 前");
+      return;
+    }
+
+    const auto & feedback = *latest_decode_feedback_;
+    RCLCPP_INFO_STREAM(
+      get_logger(), "H.264 解码队列反馈：有效，" << feedback.packet_count << "/" <<
+        feedback.max_packets << " 包，" << feedback.byte_count << "/" << feedback.max_bytes <<
+        " 字节，最老包等待 " << feedback.oldest_wait_ms << " ms，接收于 " << age_ms << " ms 前");
+  }
+
   void stop_send_thread()
   {
     if (send_thread_.joinable()) {
@@ -296,6 +327,9 @@ private:
   rclcpp::Publisher<H264Packet>::SharedPtr publisher_;
   rclcpp::Subscription<Image>::SharedPtr image_subscription_;
   rclcpp::Subscription<UInt64>::SharedPtr end_subscription_;
+  rclcpp::Subscription<H264QueueFeedback>::SharedPtr feedback_subscription_;
+  H264QueueFeedback::ConstSharedPtr latest_decode_feedback_;
+  std::chrono::steady_clock::time_point decode_feedback_received_at_;
   rclcpp::TimerBase::SharedPtr end_timer_;
   std::unique_ptr<H264PacketQueue> send_queue_;
   rclcpp::TimerBase::SharedPtr stats_timer_;
