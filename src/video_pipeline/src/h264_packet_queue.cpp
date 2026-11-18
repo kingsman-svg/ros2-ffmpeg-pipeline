@@ -54,6 +54,7 @@ void H264PacketQueue::push(Packet packet)
     }
     entries_.push_back({std::move(packet), std::chrono::steady_clock::now()});
     byte_count_ += packet_size;
+    ++total_enqueued_packets_;
   }
   ready_.notify_one();
 }
@@ -73,6 +74,7 @@ H264PacketQueue::PopResult H264PacketQueue::wait_pop(Packet & packet)
   packet = std::move(entries_.front().packet);
   entries_.pop_front();
   byte_count_ -= packet->data.size();
+  ++total_dequeued_packets_;
   return PopResult::Packet;
 }
 
@@ -86,7 +88,10 @@ H264PacketQueueStats H264PacketQueue::stats() const
   }
   const double byte_usage_percent = 100.0 * static_cast<double>(byte_count_) /
     static_cast<double>(max_bytes_);
-  return {entries_.size(), byte_count_, max_packets_, max_bytes_, byte_usage_percent, oldest_wait};
+  return {
+    entries_.size(), byte_count_, max_packets_, max_bytes_, byte_usage_percent, oldest_wait,
+    total_enqueued_packets_, total_dequeued_packets_
+  };
 }
 
 void H264PacketQueue::close()

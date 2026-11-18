@@ -23,6 +23,8 @@ struct H264PacketQueueStats
   std::size_t max_bytes;
   double byte_usage_percent;
   std::chrono::milliseconds oldest_wait;
+  std::uint64_t total_enqueued_packets;
+  std::uint64_t total_dequeued_packets;
 };
 
 std::ostream & operator<<(std::ostream & output, const H264PacketQueueStats & stats);
@@ -61,6 +63,8 @@ private:
   std::condition_variable ready_;
   std::deque<Entry> entries_;
   std::size_t byte_count_ = 0;
+  std::uint64_t total_enqueued_packets_ = 0;
+  std::uint64_t total_dequeued_packets_ = 0;
   State state_ = State::Open;
 };
 

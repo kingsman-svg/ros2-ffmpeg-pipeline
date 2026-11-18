@@ -125,6 +125,19 @@ ros2 topic hz /video/decoded_image
 
 解码节点每 200 ms 在 `/video/queue_feedback` 发布一份 `H264QueueFeedback`。消息包含当前包数、当前 H.264 数据字节数、两种容量上限和最老包等待时间。反馈使用 `KeepLast(1)`、`BestEffort` 和 `Volatile`。
 
+反馈还带有从解码节点启动起的累计数据。
+
+| 字段 | 统计口径 |
+|---|---|
+| `sample_elapsed_us` | 采样时的单调时钟经过量，单位为微秒 |
+| `total_enqueued_packets`、`total_dequeued_packets` | 成功入队和取出的 H.264 数据包数，结束标记不计入 |
+| `total_published_frames` | 成功发布的 RGB 图像帧数 |
+| `total_decode_time_us` | FFmpeg 送包、取帧和结束排空调用的累计耗时 |
+| `total_convert_time_us` | 像素格式转为 RGB 的累计耗时 |
+| `total_publish_time_us` | 构建 ROS 图像消息和调用 `publish()` 的累计耗时 |
+
+三段耗时都使用 `std::chrono::steady_clock`，解码线程处理完一个包或结束排空后汇总。把两次采样的 `sample_elapsed_us` 差值换算成秒，再用计数差除以这段时间，就能得到每秒入队包数、取出包数和发布帧数。
+
 编码节点每秒打印本地发送队列和最新的解码队列反馈。接收后满 1 秒仍没有新样本时，反馈标为过期。超时由编码端的单调时钟计算。
 
 ~~~bash
