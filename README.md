@@ -147,9 +147,23 @@ ros2 interface show video_pipeline_msgs/msg/H264QueueFeedback
 ros2 topic echo /video/queue_feedback --qos-reliability best_effort
 ~~~
 
+### 开启 H.264 自适应码率
+
+`adaptive_bit_rate:=true` 开启自适应模式，此时 `bit_rate` 指定码率上限。节点从上限的一半起步，初始慢启动阈值为上限的 75%，最低码率取上限的八分之一。控制器使用 libx264 支持的 kb/s 粒度，最低 1 kb/s。默认启动使用固定码率。
+
+~~~bash
+ros2 launch video_pipeline video_pipeline.launch.py \
+  input_path:=/tmp/video_publisher_demo.mp4 fps:=10 \
+  adaptive_bit_rate:=true bit_rate:=600000
+~~~
+
+编码节点每 200 ms 采样发送队列和解码反馈，用约 1 秒的窗口计算包速率、字节率和解码端占用时间。反馈有效且解码端有余量时，发送队列等待持续至少 1 秒达到 300 ms、编码包率和字节率都超过发布时，目标码率和慢启动阈值降到当前目标的一半。等待两端低于 100 ms 并连续稳定 2 秒后恢复增速。健康时每秒探测一次，低于慢启动阈值时最多增长 50%，达到阈值后每次加上限的 5%。反馈过期或下游积压时保持目标码率。
+
+码率变更日志包含触发原因、变更前后的目标、慢启动阈值及当时窗口内的实际编码和发布位速率。
+
 ### 运行 H.264 队列压测
 
-在 Linux 开发容器里完成构建后，在工作空间根目录运行。脚本使用容器已有的 `ffmpeg` 和 C 编译器。
+在 Linux 开发容器里完成构建后，在工作空间根目录运行。脚本使用容器已有的 `ffmpeg` 和 C++ 编译器。
 
 ~~~bash
 source /opt/ros/humble/setup.bash
@@ -161,7 +175,9 @@ python3 scripts/queue_pressure_test.py
 
 前四个场景还会检查 80 个 H.264 包及其 PTS、解码图像和源图像的时间戳与顺序，以及 H.264 结束标记是否只在最后出现一次。脚本在终端报告各场景的结果，并打印报告目录，可用 `--output-dir` 指定目录。目录中的 `runs.csv` 记录帧数、退出码、各队列的采样峰值和反馈恢复情况，`queue_samples.csv` 记录每秒的队列包数、字节数、占用率和最老包的等待时间，每个场景还有一份 launch 日志。短时间内退出的超限场景可能没有队列采样。
 
-脚本只在本机 ROS 域内运行，默认依次使用 160 至 165，可用 `--domain-id` 修改起始值。临时测试库只随慢速和反馈中断场景加载。报告中的峰值来自每秒一次的队列日志采样。
+自适应码率场景使用 240 帧测试片段，从第 51 包开始按 H.264 字节数限速至 330 kb/s。脚本检查慢启动、拥塞降速、实际编码速率降低以及限速期间的队列恢复。可以用 `--case adaptive_bit_rate` 单独运行。
+
+脚本只在本机 ROS 域内运行，完整压测默认依次使用 160 至 166，可用 `--domain-id` 修改起始值。临时测试库随慢速、反馈中断和字节限速场景加载。报告中的峰值来自每秒一次的队列日志采样。
 
 ## 封装类
 

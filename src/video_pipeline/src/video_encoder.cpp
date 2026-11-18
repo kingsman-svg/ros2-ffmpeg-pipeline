@@ -1,6 +1,7 @@
 #include "video_pipeline/video_encoder.h"
 
 #include <cerrno>
+#include <cstring>
 
 extern "C" {
 #include <libavutil/opt.h>
@@ -24,7 +25,7 @@ int VideoEncoder::open(const VideoEncoderConfig & config)
   close();
   if (config.width <= 0 || config.height <= 0 || config.frames_per_second <= 0 ||
     config.bit_rate <= 0 || config.gop_size <= 0 || config.max_b_frames < 0 ||
-    config.pixel_format == AV_PIX_FMT_NONE)
+    config.pixel_format == AV_PIX_FMT_NONE || config.vbv_buffer_size < 0)
   {
     return AVERROR(EINVAL);
   }
@@ -38,6 +39,12 @@ int VideoEncoder::open(const VideoEncoderConfig & config)
   if (codec == nullptr || codec->id != AV_CODEC_ID_H264 || codec->type != AVMEDIA_TYPE_VIDEO) {
     return AVERROR_ENCODER_NOT_FOUND;
   }
+  if (config.vbv_buffer_size > 0 &&
+    (std::strcmp(codec->name, "libx264") != 0 ||
+    config.vbv_buffer_size < 1000 || config.bit_rate < 1000 || config.bit_rate > 2000000000))
+  {
+    return AVERROR(EINVAL);
+  }
 
   codec_context_ = avcodec_alloc_context3(codec);
   if (codec_context_ == nullptr) {
@@ -49,6 +56,10 @@ int VideoEncoder::open(const VideoEncoderConfig & config)
   codec_context_->time_base = AVRational{1, config.frames_per_second};
   codec_context_->framerate = AVRational{config.frames_per_second, 1};
   codec_context_->bit_rate = config.bit_rate;
+  if (config.vbv_buffer_size > 0) {
+    codec_context_->rc_max_rate = config.bit_rate;
+    codec_context_->rc_buffer_size = config.vbv_buffer_size;
+  }
   codec_context_->gop_size = config.gop_size;
   codec_context_->max_b_frames = config.max_b_frames;
   codec_context_->pix_fmt = config.pixel_format;
@@ -92,6 +103,18 @@ int VideoEncoder::receive_packet(AVPacket * packet)
     return AVERROR(EINVAL);
   }
   return avcodec_receive_packet(codec_context_, packet);
+}
+
+int VideoEncoder::set_bit_rate(std::int64_t bit_rate)
+{
+  if (codec_context_ == nullptr || codec_context_->rc_buffer_size <= 0 ||
+    bit_rate < 1000 || bit_rate > 2000000000)
+  {
+    return AVERROR(EINVAL);
+  }
+  codec_context_->bit_rate = bit_rate;
+  codec_context_->rc_max_rate = bit_rate;
+  return 0;
 }
 
 int VideoEncoder::copy_codec_parameters(AVCodecParameters * parameters) const

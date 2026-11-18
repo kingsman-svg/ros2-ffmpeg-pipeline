@@ -1,8 +1,10 @@
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <limits>
 #include <map>
@@ -23,6 +25,7 @@ extern "C" {
 #include "std_msgs/msg/header.hpp"
 #include "std_msgs/msg/u_int64.hpp"
 
+#include "video_pipeline/bitrate_controller.h"
 #include "video_pipeline/ffmpeg_resources.h"
 #include "video_pipeline/h264_packet_queue.h"
 #include "video_pipeline/image_converter.h"
@@ -35,6 +38,9 @@ namespace
 
 using sensor_msgs::msg::Image;
 using std_msgs::msg::UInt64;
+using video_pipeline::BitrateChange;
+using video_pipeline::BitrateController;
+using video_pipeline::BitrateMetrics;
 using video_pipeline::ffmpeg_error;
 using video_pipeline::FrameDeleter;
 using video_pipeline::H264PacketQueue;
@@ -43,6 +49,22 @@ using video_pipeline_msgs::msg::H264Packet;
 using video_pipeline_msgs::msg::H264QueueFeedback;
 
 constexpr std::chrono::seconds kQueueFeedbackTimeout{1};
+constexpr std::chrono::milliseconds kSamplePeriod{200};
+constexpr std::chrono::seconds kRateWindow{1};
+
+using SteadyClock = std::chrono::steady_clock;
+
+struct EncoderSample
+{
+  SteadyClock::time_point sampled_at;
+  video_pipeline::H264PacketQueueStats send_queue;
+  std::int64_t input_frames;
+  std::uint64_t encoded_payload_bytes;
+  std::uint64_t published_packets;
+  std::uint64_t published_payload_bytes;
+  H264QueueFeedback::ConstSharedPtr decode_feedback;
+  SteadyClock::time_point feedback_received_at;
+};
 
 class H264EncoderNode : public rclcpp::Node
 {
@@ -66,6 +88,12 @@ public:
     encoder_config_.gop_size = encoder_config_.frames_per_second;
     encoder_config_.encoder_name = "libx264";
     encoder_config_.tune = "zerolatency";
+    if (declare_parameter<bool>("adaptive_bit_rate", false, startup_parameter)) {
+      bitrate_controller_ = std::make_unique<BitrateController>(encoder_config_.bit_rate);
+      encoder_config_.vbv_buffer_size =
+        static_cast<int>(std::max<std::int64_t>(1000, encoder_config_.bit_rate / 2));
+      encoder_config_.bit_rate = bitrate_controller_->bit_rate();
+    }
 
     const auto max_packets = declare_parameter<std::int64_t>("queue_max_packets", 120, startup_parameter);
     const auto max_bytes = declare_parameter<std::int64_t>("queue_max_bytes", 8 * 1024 * 1024, startup_parameter);
@@ -85,6 +113,11 @@ public:
         decode_feedback_received_at_ = std::chrono::steady_clock::now();
       });
     stats_timer_ = create_wall_timer(std::chrono::seconds(1), [this]() {log_queue_stats();});
+    if (bitrate_controller_) {
+      bitrate_timer_ = create_wall_timer(kSamplePeriod, [this]() {update_bit_rate();});
+      RCLCPP_INFO_STREAM(
+        get_logger(), "H.264 自适应码率启动，初始目标 " << encoder_config_.bit_rate << " bit/s");
+    }
 
     RCLCPP_INFO_STREAM(
       get_logger(), "等待 " << image_subscription_->get_topic_name()
@@ -115,42 +148,142 @@ public:
   }
 
 private:
+  EncoderSample sample_encoder()
+  {
+    // 锁内同步采集出队和发布计数，发布本身由发送线程在锁外执行。
+    std::lock_guard<std::mutex> lock(publish_stats_mutex_);
+    const auto queue_stats = send_queue_->stats();
+    return {
+      SteadyClock::now(), queue_stats, next_pts_, total_encoded_payload_bytes_,
+      total_published_packets_, total_published_payload_bytes_, latest_decode_feedback_,
+      decode_feedback_received_at_
+    };
+  }
+
   void log_queue_stats()
   {
-    video_pipeline::H264PacketQueueStats queue_stats;
-    std::uint64_t published_packets;
-    std::uint64_t published_payload_bytes;
-    {
-      // 读取出队数时固定发布计数，至多有一个包已出队但尚未计入发布。
-      std::lock_guard<std::mutex> lock(publish_stats_mutex_);
-      queue_stats = send_queue_->stats();
-      published_packets = total_published_packets_;
-      published_payload_bytes = total_published_payload_bytes_;
-    }
+    const auto sample = sample_encoder();
+    const auto & queue_stats = sample.send_queue;
     RCLCPP_INFO_STREAM(get_logger(), "H.264 发送队列：" << queue_stats);
     // 当前 PTS 从零开始，每成功送入一帧加一，也就是累计输入帧数。
     RCLCPP_INFO_STREAM(
-      get_logger(), "H.264 编码端累计：输入 " << next_pts_ << " 帧，入队 " <<
+      get_logger(), "H.264 编码端累计：输入 " << sample.input_frames << " 帧，入队 " <<
         queue_stats.total_enqueued_packets << " 包，出队 " << queue_stats.total_dequeued_packets <<
-        " 包，发布 " << published_packets << " 包，数据 " << published_payload_bytes << " 字节");
-    if (!latest_decode_feedback_) {
+        " 包，发布 " << sample.published_packets << " 包，数据 " <<
+        sample.published_payload_bytes << " 字节");
+    if (!sample.decode_feedback) {
       RCLCPP_INFO(get_logger(), "H.264 解码队列反馈：尚未收到");
       return;
     }
 
     // 用编码节点的单调时钟计算接收间隔，允许两个节点跨主机运行。
-    const auto age = std::chrono::steady_clock::now() - decode_feedback_received_at_;
+    const auto age = sample.sampled_at - sample.feedback_received_at;
     const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(age).count();
     if (age >= kQueueFeedbackTimeout) {
       RCLCPP_INFO_STREAM(get_logger(), "H.264 解码队列反馈：已过期，接收于 " << age_ms << " ms 前");
       return;
     }
 
-    const auto & feedback = *latest_decode_feedback_;
+    const auto & feedback = *sample.decode_feedback;
     RCLCPP_INFO_STREAM(
       get_logger(), "H.264 解码队列反馈：有效，" << feedback.packet_count << "/" <<
         feedback.max_packets << " 包，" << feedback.byte_count << "/" << feedback.max_bytes <<
         " 字节，最老包等待 " << feedback.oldest_wait_ms << " ms，接收于 " << age_ms << " ms 前");
+  }
+
+  void read_decode_metrics(
+    const EncoderSample & before, const EncoderSample & current, BitrateMetrics & metrics)
+  {
+    if (!before.decode_feedback || !current.decode_feedback ||
+      before.sampled_at - before.feedback_received_at >= kQueueFeedbackTimeout ||
+      current.sampled_at - current.feedback_received_at >= kQueueFeedbackTimeout)
+    {
+      return;
+    }
+
+    // 远端计数只用解码端自己的单调时钟计算，反馈丢失时也按实际时间差计算。
+    const auto & first = *before.decode_feedback;
+    const auto & last = *current.decode_feedback;
+    if (last.sample_elapsed_us <= first.sample_elapsed_us ||
+      last.total_enqueued_packets < first.total_enqueued_packets ||
+      last.total_dequeued_packets < first.total_dequeued_packets ||
+      last.total_decode_time_us < first.total_decode_time_us ||
+      last.total_convert_time_us < first.total_convert_time_us ||
+      last.total_publish_time_us < first.total_publish_time_us)
+    {
+      return;
+    }
+    const auto elapsed_us = last.sample_elapsed_us - first.sample_elapsed_us;
+    if (elapsed_us < 500000 || elapsed_us > 2000000) {
+      return;
+    }
+    const auto decode_us = last.total_decode_time_us - first.total_decode_time_us;
+    const auto convert_us = last.total_convert_time_us - first.total_convert_time_us;
+    const auto publish_us = last.total_publish_time_us - first.total_publish_time_us;
+    const double seconds = elapsed_us / 1000000.0;
+    metrics.decode_wait_ms = last.oldest_wait_ms;
+    metrics.decode_enqueue_packets_per_second =
+      (last.total_enqueued_packets - first.total_enqueued_packets) / seconds;
+    metrics.decode_dequeue_packets_per_second =
+      (last.total_dequeued_packets - first.total_dequeued_packets) / seconds;
+    metrics.decode_busy_fraction = (static_cast<double>(decode_us) + convert_us + publish_us) /
+      elapsed_us;
+    metrics.feedback_valid = true;
+  }
+
+  void update_bit_rate()
+  {
+    if (next_pts_ == 0 || end_received_) {
+      return;
+    }
+    const auto current = sample_encoder();
+    samples_.push_back(current);
+    while (samples_.size() > 1 && current.sampled_at - samples_[1].sampled_at >= kRateWindow) {
+      samples_.pop_front();
+    }
+    const auto & before = samples_.front();
+    const auto elapsed = current.sampled_at - before.sampled_at;
+    if (elapsed < kRateWindow || elapsed >= 2 * kRateWindow) {
+      return;
+    }
+    const double seconds = std::chrono::duration<double>(elapsed).count();
+    BitrateMetrics metrics;
+    metrics.sampled_at = current.sampled_at;
+    metrics.send_wait_ms = static_cast<std::uint64_t>(current.send_queue.oldest_wait.count());
+    metrics.encoded_packets_per_second =
+      (current.send_queue.total_enqueued_packets - before.send_queue.total_enqueued_packets) /
+      seconds;
+    metrics.published_packets_per_second =
+      (current.published_packets - before.published_packets) / seconds;
+    metrics.encoded_bits_per_second =
+      (current.encoded_payload_bytes - before.encoded_payload_bytes) * 8.0 / seconds;
+    metrics.published_bits_per_second =
+      (current.published_payload_bytes - before.published_payload_bytes) * 8.0 / seconds;
+    read_decode_metrics(before, current, metrics);
+
+    const auto decision = bitrate_controller_->update(metrics);
+    if (decision.change == BitrateChange::Hold) {
+      return;
+    }
+    // 定时器和图像回调都由节点执行器串行调用，更新会在下一帧编码时生效。
+    const auto previous_rate = encoder_config_.bit_rate;
+    const int result = encoder_.set_bit_rate(decision.bit_rate);
+    if (result < 0) {
+      throw ffmpeg_error("更新 H.264 目标码率失败", result);
+    }
+    encoder_config_.bit_rate = decision.bit_rate;
+
+    const char * reason = "稳定增速";
+    if (decision.change == BitrateChange::SendCongestion) {
+      reason = "发送拥塞";
+    } else if (decision.change == BitrateChange::SlowStart) {
+      reason = "慢启动";
+    }
+    RCLCPP_INFO_STREAM(
+      get_logger(), "H.264 码率调整：" << reason << "，目标 " << previous_rate << " -> " <<
+        decision.bit_rate << " bit/s，ssthresh " << decision.slow_start_threshold <<
+        " bit/s，窗口编码 " << static_cast<std::int64_t>(metrics.encoded_bits_per_second) <<
+        " bit/s，发布 " << static_cast<std::int64_t>(metrics.published_bits_per_second) << " bit/s");
   }
 
   void stop_send_thread()
@@ -290,7 +423,9 @@ private:
       message->time_base_den = time_base.den;
       message->key_frame = (packet_->flags & AV_PKT_FLAG_KEY) != 0;
       message->data.assign(packet_->data, packet_->data + packet_->size);
+      const auto payload_bytes = message->data.size();
       send_queue_->push(std::move(message));
+      total_encoded_payload_bytes_ += payload_bytes;
       input_headers_.erase(header);
     }
   }
@@ -340,6 +475,8 @@ private:
 
   video_pipeline::VideoEncoder encoder_;
   video_pipeline::VideoEncoderConfig encoder_config_;
+  std::unique_ptr<BitrateController> bitrate_controller_;
+  std::deque<EncoderSample> samples_;
   video_pipeline::ImageConverter converter_;
   std::unique_ptr<AVFrame, FrameDeleter> rgb_frame_;
   std::unique_ptr<AVFrame, FrameDeleter> yuv_frame_;
@@ -357,6 +494,8 @@ private:
   rclcpp::TimerBase::SharedPtr end_timer_;
   std::unique_ptr<H264PacketQueue> send_queue_;
   rclcpp::TimerBase::SharedPtr stats_timer_;
+  rclcpp::TimerBase::SharedPtr bitrate_timer_;
+  std::uint64_t total_encoded_payload_bytes_ = 0;
   std::mutex publish_stats_mutex_;
   std::uint64_t total_published_packets_ = 0;
   std::uint64_t total_published_payload_bytes_ = 0;

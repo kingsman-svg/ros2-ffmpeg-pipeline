@@ -1,4 +1,4 @@
-"""在 ROS 2 容器里验证 H.264 队列积压、排空、容量错误和反馈。"""
+"""在 ROS 2 容器里验证 H.264 队列、反馈和自适应码率。"""
 
 import argparse
 import csv
@@ -23,6 +23,10 @@ from video_pipeline_msgs.msg import H264Packet
 
 FPS = 10
 FRAME_COUNT = 80
+ADAPTIVE_FRAME_COUNT = 240
+ADAPTIVE_MAX_BIT_RATE = 600000
+ADAPTIVE_LINK_BIT_RATE = 330000
+ADAPTIVE_LIMIT_START_AFTER = 50
 START_AFTER = 5
 DELAY_COUNT = 18
 DELAY_MS = 220
@@ -40,6 +44,7 @@ CASES = (
     "feedback_gap",
     "send_overflow",
     "decode_overflow",
+    "adaptive_bit_rate",
 )
 QUEUE_SAMPLE = re.compile(
     r"\[INFO\] \[(?P<timestamp>\d+(?:\.\d+)?)\] \[[^\]]+\]: "
@@ -49,6 +54,12 @@ QUEUE_SAMPLE = re.compile(
 )
 ENCODER_FEEDBACK = re.compile(
     r"\[h264_encoder\]: H\.264 解码队列反馈：(?:有效，(?P<packets>\d+)/\d+ 包|已过期)"
+)
+BITRATE_CHANGE = re.compile(
+    r"\[INFO\] \[(?P<timestamp>\d+(?:\.\d+)?)\] \[h264_encoder\]: "
+    r"H\.264 码率调整：(?P<reason>慢启动|稳定增速|发送拥塞)，目标 (?P<previous>\d+) -> "
+    r"(?P<target>\d+) bit/s，ssthresh (?P<threshold>\d+) bit/s，"
+    r"窗口编码 (?P<encoded>\d+) bit/s"
 )
 SAMPLE_FIELDS = (
     "case", "timestamp", "queue", "packets", "max_packets", "packet_usage_pct",
@@ -64,14 +75,14 @@ def image_header(header):
 class PipelineObserver(Node):
     """通过实际消息验证帧数、顺序和结束标记。"""
 
-    def __init__(self, context):
+    def __init__(self, context, frame_count):
         super().__init__("queue_pressure_observer", context=context)
         self.source_headers = []
         self.decoded_headers = []
         self.packets = []
-        self.create_subscription(Image, "/video/image_raw", self.on_source, FRAME_COUNT)
-        self.create_subscription(Image, "/video/decoded_image", self.on_decoded, FRAME_COUNT)
-        self.create_subscription(H264Packet, "/video/h264", self.on_packet, FRAME_COUNT + 1)
+        self.create_subscription(Image, "/video/image_raw", self.on_source, frame_count)
+        self.create_subscription(Image, "/video/decoded_image", self.on_decoded, frame_count)
+        self.create_subscription(H264Packet, "/video/h264", self.on_packet, frame_count + 1)
 
     def on_source(self, message):
         self.source_headers.append(image_header(message.header))
@@ -87,14 +98,16 @@ class PipelineObserver(Node):
 
 
 def build_delay_library(directory):
-    """只给压测启动的进程加载延迟库。"""
-    source = Path(__file__).with_name("queue_pressure_delay.c")
+    """只给压测启动的进程加载延迟或限速库。"""
+    source = Path(__file__).with_name("queue_pressure_delay.cpp")
     library = directory / "queue_pressure_delay.so"
-    include_dir = Path(get_package_prefix("rcl")) / "include"
-    command = ["cc", "-std=c11", "-shared", "-fPIC", "-I", str(include_dir)]
-    for package_dir in sorted(include_dir.iterdir()):
-        if package_dir.is_dir():
-            command.extend(["-I", str(package_dir)])
+    command = ["c++", "-std=c++14", "-shared", "-fPIC"]
+    for package in ("rcl", "video_pipeline_msgs"):
+        include_dir = Path(get_package_prefix(package)) / "include"
+        command.extend(["-I", str(include_dir)])
+        for package_dir in sorted(include_dir.iterdir()):
+            if package_dir.is_dir():
+                command.extend(["-I", str(package_dir)])
     command.extend([str(source), "-o", str(library), "-ldl"])
     subprocess.run(command, check=True)
     return library
@@ -198,7 +211,37 @@ def summarize_feedback(log):
     return peak_packets, drained, recovered
 
 
-def run_case(case, domain_id, video, delay_library, log_path):
+def verify_adaptive_bit_rate(log, samples):
+    """链路持续限速时，检查降码率是否缓解积压并恢复增速。"""
+    changes = [match.groupdict() for match in BITRATE_CHANGE.finditer(log)]
+    if not any(change["reason"] == "慢启动" for change in changes):
+        return "未观察到慢启动增速"
+    cut_index = next(
+        (index for index, change in enumerate(changes) if change["reason"] == "发送拥塞"), None
+    )
+    if cut_index is None:
+        return "限速后未触发降码率"
+    cut = changes[cut_index]
+    if not 0 < int(cut["target"]) <= int(cut["previous"]) / 2 or cut["target"] != cut["threshold"]:
+        return "降速目标或慢启动阈值与减半规则不符"
+
+    recovery = next(
+        (change for change in changes[cut_index + 1:] if change["reason"] == "稳定增速"), None
+    )
+    if recovery is None:
+        return "降码率后未恢复增速"
+    if int(recovery["encoded"]) >= min(int(cut["encoded"]) * 0.9, ADAPTIVE_LINK_BIT_RATE):
+        return "降码率后的实际编码字节率未降到链路上限以下"
+    if not any(
+        sample["queue"] == "send" and sample["oldest_wait_ms"] < 100
+        and float(cut["timestamp"]) <= float(sample["timestamp"]) <= float(recovery["timestamp"])
+        for sample in samples
+    ):
+        return "持续限速时未观察到发送队列回落"
+    return ""
+
+
+def run_case(case, domain_id, video, frame_count, delay_library, log_path):
     command = [
         "ros2", "launch", "video_pipeline", "video_pipeline.launch.py",
         f"input_path:={video}", f"fps:={FPS}",
@@ -214,9 +257,10 @@ def run_case(case, domain_id, video, delay_library, log_path):
     slow_queue = None
     overflow_queue = None
     feedback_gap = case == "feedback_gap"
+    adaptive = case == "adaptive_bit_rate"
     if case.startswith("slow_"):
         slow_queue = case.removeprefix("slow_")
-    if slow_queue or feedback_gap:
+    if slow_queue or feedback_gap or adaptive:
         preload = str(delay_library)
         if env.get("LD_PRELOAD"):
             preload += ":" + env["LD_PRELOAD"]
@@ -224,7 +268,14 @@ def run_case(case, domain_id, video, delay_library, log_path):
             LD_PRELOAD=preload,
             QUEUE_PRESSURE_DELAY_MS=str(DELAY_MS),
         )
-        if feedback_gap:
+        if adaptive:
+            command.extend(["adaptive_bit_rate:=true", f"bit_rate:={ADAPTIVE_MAX_BIT_RATE}"])
+            env.update(
+                QUEUE_PRESSURE_TOPIC="/video/h264",
+                QUEUE_PRESSURE_START_AFTER=str(ADAPTIVE_LIMIT_START_AFTER),
+                QUEUE_PRESSURE_BIT_RATE=str(ADAPTIVE_LINK_BIT_RATE),
+            )
+        elif feedback_gap:
             env.update(
                 QUEUE_PRESSURE_TOPIC="/video/queue_feedback",
                 QUEUE_PRESSURE_START_AFTER=str(FEEDBACK_DROP_START_AFTER),
@@ -245,7 +296,7 @@ def run_case(case, domain_id, video, delay_library, log_path):
     context = Context()
     rclpy.init(args=[], context=context, domain_id=domain_id,
                signal_handler_options=SignalHandlerOptions.NO)
-    observer = PipelineObserver(context)
+    observer = PipelineObserver(context, frame_count)
     executor = SingleThreadedExecutor(context=context)
     executor.add_node(observer)
     try:
@@ -271,7 +322,7 @@ def run_case(case, domain_id, video, delay_library, log_path):
     else:
         if exit_code != 0 or log.count("process has finished cleanly") != 3:
             problems.append("三个节点未全部正常退出")
-        if len(observer.source_headers) != FRAME_COUNT or observer.decoded_headers != observer.source_headers:
+        if len(observer.source_headers) != frame_count or observer.decoded_headers != observer.source_headers:
             problems.append("源帧数不符，或解码帧与源帧的数量、时间戳或顺序不一致")
         if data_packets != expected_packets:
             problems.append("H.264 包的 PTS、时间戳或顺序不符")
@@ -283,6 +334,10 @@ def run_case(case, domain_id, video, delay_library, log_path):
             problems.append("编码端未观察到解码队列积压后恢复为空")
         if feedback_gap and not feedback_recovered:
             problems.append("编码端未观察到反馈由有效到过期、再恢复有效")
+        if adaptive:
+            adaptive_problem = verify_adaptive_bit_rate(log, samples)
+            if adaptive_problem:
+                problems.append(adaptive_problem)
 
     result = {
         "case": case,
@@ -314,9 +369,11 @@ def run_case(case, domain_id, video, delay_library, log_path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, help="CSV 和日志目录，默认新建临时目录")
-    parser.add_argument("--domain-id", type=int, default=160, help=f"起始 ROS 域 ID，连续使用 {len(CASES)} 个域")
+    parser.add_argument("--case", choices=CASES, help="仅运行指定场景")
+    parser.add_argument("--domain-id", type=int, default=160, help="起始 ROS 域 ID，每个场景使用一个域")
     args = parser.parse_args()
-    max_starting_domain = 232 - len(CASES) + 1
+    cases = (args.case,) if args.case else CASES
+    max_starting_domain = 232 - len(cases) + 1
     if not 0 <= args.domain_id <= max_starting_domain:
         parser.error(f"--domain-id 必须在 0 到 {max_starting_domain} 之间")
     os.environ["ROS_LOCALHOST_ONLY"] = "1"
@@ -329,19 +386,24 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="queue-pressure-input-") as directory:
         scratch = Path(directory)
-        video = scratch / "test.mp4"
-        subprocess.run([
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-            f"testsrc2=size=162x120:rate={FPS}", "-frames:v", str(FRAME_COUNT),
-            "-c:v", "mpeg4", str(video),
-        ], check=True)
+        videos = {}
         delay_library = build_delay_library(scratch)
         results = []
         all_samples = []
-        for index, case in enumerate(CASES):
+        for index, case in enumerate(cases):
             print(f"运行 {case} …", flush=True)
+            frame_count = ADAPTIVE_FRAME_COUNT if case == "adaptive_bit_rate" else FRAME_COUNT
+            if frame_count not in videos:
+                video = scratch / f"test-{frame_count}.mp4"
+                subprocess.run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                    f"testsrc2=size=162x120:rate={FPS}", "-frames:v", str(frame_count),
+                    "-c:v", "mpeg4", str(video),
+                ], check=True)
+                videos[frame_count] = video
             result, samples = run_case(
-                case, args.domain_id + index, video, delay_library, output / f"{case}.log",
+                case, args.domain_id + index, videos[frame_count], frame_count, delay_library,
+                output / f"{case}.log",
             )
             results.append(result)
             all_samples.extend(samples)

@@ -19,6 +19,8 @@ def generate_launch_description():
         DeclareLaunchArgument('input_path', description='容器内的视频文件路径'),
         DeclareLaunchArgument('fps', default_value='30', description='发布和编码帧率，使用正整数'),
         DeclareLaunchArgument('bit_rate', default_value='2000000', description='编码目标码率，单位 bit/s'),
+        DeclareLaunchArgument(
+            'adaptive_bit_rate', default_value='false', description='开启自适应码率'),
         DeclareLaunchArgument('send_queue_max_packets', default_value='120', description='发送队列最大包数'),
         DeclareLaunchArgument('send_queue_max_bytes', default_value='8388608', description='发送队列最大数据字节数'),
         DeclareLaunchArgument('decode_queue_max_packets', default_value='120', description='解码队列最大包数'),
@@ -43,6 +45,8 @@ def generate_launch_description():
             parameters=[{
                 'fps': ParameterValue(fps, value_type=int),
                 'bit_rate': ParameterValue(LaunchConfiguration('bit_rate'), value_type=int),
+                'adaptive_bit_rate': ParameterValue(
+                    LaunchConfiguration('adaptive_bit_rate'), value_type=bool),
                 'queue_max_packets': ParameterValue(
                     LaunchConfiguration('send_queue_max_packets'), value_type=int),
                 'queue_max_bytes': ParameterValue(

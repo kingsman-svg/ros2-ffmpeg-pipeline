@@ -23,6 +23,8 @@ struct VideoEncoderConfig
   bool global_header = false;
   std::string encoder_name;
   std::string tune;
+  // 正值会为 libx264 启用 VBV 缓冲，单位为 bit。
+  int vbv_buffer_size = 0;
 };
 
 class VideoEncoder
@@ -40,6 +42,8 @@ public:
   // 输入帧的 PTS 使用 time_base() 的单位；传入 nullptr 表示输入结束。
   int send_frame(const AVFrame * frame);
   int receive_packet(AVPacket * packet);
+  // 在相邻编码调用之间更新已启用 VBV 的 libx264 目标码率与峰值限制。
+  int set_bit_rate(std::int64_t bit_rate);
 
   // parameters 由调用者分配和释放，可用于传递编码器参数。
   int copy_codec_parameters(AVCodecParameters * parameters) const;

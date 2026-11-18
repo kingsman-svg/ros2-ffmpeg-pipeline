@@ -40,6 +40,14 @@ set_target_properties(h264_packet_queue PROPERTIES
   CXX_EXTENSIONS NO
 )
 
+add_library(bitrate_controller STATIC src/bitrate_controller.cpp)
+target_include_directories(bitrate_controller PUBLIC include)
+set_target_properties(bitrate_controller PROPERTIES
+  CXX_STANDARD 11
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+
 add_executable(ffmpeg_video_probe src/ffmpeg_video_probe.cpp)
 target_link_libraries(ffmpeg_video_probe PRIVATE ffmpeg_video)
 set_target_properties(ffmpeg_video_probe PROPERTIES
@@ -67,7 +75,7 @@ set_target_properties(video_file_source_node PROPERTIES
 
 add_executable(h264_encoder_node nodes/h264_encoder_node.cpp)
 ament_target_dependencies(h264_encoder_node rclcpp rcl_interfaces sensor_msgs std_msgs video_pipeline_msgs)
-target_link_libraries(h264_encoder_node ffmpeg_video h264_packet_queue)
+target_link_libraries(h264_encoder_node ffmpeg_video h264_packet_queue bitrate_controller)
 set_target_properties(h264_encoder_node PROPERTIES
   CXX_STANDARD 14
   CXX_STANDARD_REQUIRED YES
@@ -89,5 +97,12 @@ install(TARGETS video_file_source_node h264_encoder_node h264_decoder_node
 )
 
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+
+if(BUILD_TESTING)
+  enable_testing()
+  add_executable(bitrate_controller_test test/bitrate_controller_test.cpp)
+  target_link_libraries(bitrate_controller_test bitrate_controller)
+  add_test(NAME bitrate_controller_test COMMAND bitrate_controller_test)
+endif()
 
 ament_package()
