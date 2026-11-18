@@ -91,8 +91,20 @@ set_target_properties(h264_decoder_node PROPERTIES
   CXX_EXTENSIONS NO
 )
 
+set(audio_pipeline_nodes audio_file_source_node opus_encoder_node opus_decoder_node av_sync_node)
+foreach(node IN LISTS audio_pipeline_nodes)
+  add_executable(${node} nodes/${node}.cpp)
+  ament_target_dependencies(${node} rclcpp sensor_msgs std_msgs video_pipeline_msgs)
+  target_link_libraries(${node} ffmpeg_video)
+  set_target_properties(${node} PROPERTIES
+    CXX_STANDARD 14
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
+endforeach()
+
 install(TARGETS video_file_source_node h264_encoder_node h264_decoder_node
-  ffmpeg_video_probe ffmpeg_audio_probe
+  ffmpeg_video_probe ffmpeg_audio_probe ${audio_pipeline_nodes}
   DESTINATION lib/${PROJECT_NAME}
 )
 

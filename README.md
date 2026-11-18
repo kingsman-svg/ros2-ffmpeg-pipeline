@@ -33,6 +33,34 @@ ros2 launch video_pipeline video_pipeline.launch.py \
 
 `input_path` 必填。`fps` 是用于发布和编码的正整数帧率，默认 `30`。`bit_rate` 是编码目标码率，默认 `2000000` bit/s。文件源等图像、结束通知和 H.264 链路就绪后才开始发布。视频播完后，三个节点会依次排出缓冲数据并退出。
 
+## 音频话题与音视频同步
+
+在现有 launch 上添加 `with_audio:=true`，从同一个文件读取视频和连续音轨。Opus 编码默认 64 kb/s，可通过 `audio_bit_rate` 设置。
+
+~~~bash
+ros2 launch video_pipeline video_pipeline.launch.py \
+  input_path:=/tmp/input.mp4 fps:=30 with_audio:=true
+~~~
+
+| 节点 | 输入 → 输出 |
+|---|---|
+| `audio_file_source_node` | 文件音轨 → `/audio/pcm_raw` |
+| `opus_encoder_node` | `/audio/pcm_raw` → `/audio/opus` |
+| `opus_decoder_node` | `/audio/opus` → `/audio/decoded_pcm` |
+| `av_sync_node` | `/audio/decoded_pcm`、`/video/decoded_image` → `/av/audio`、`/av/video` |
+
+`PcmAudio` 使用 48 kHz 双声道 S16LE。文件节点按 20 ms 分块，尾块保留实际采样数。消息带每声道采样位置和块首时间戳。音频结束消息与数据共用话题，`first_sample_index` 此时是每声道总采样数。Opus 消息携带有效采样范围，解码节点用它裁掉编码器延迟和尾部填充。
+
+音视频模式用文件起点作为共同的时间零点。视频使用解码帧的媒体时间戳，音频从音轨起始时间按采样数推进。同步节点先等待链路就绪，预缓冲 200 ms，再用同一个单调时钟按这些时间戳发布。同步视频的最终帧数在 `/av/video_end`，音频的最终采样数在 `/av/audio` 的结束消息。
+
+只查看 PCM 时，可单独启动文件节点，再订阅 `/audio/pcm_raw`。文件节点会等到有订阅者再发送第一块。
+
+~~~bash
+ros2 run video_pipeline audio_file_source_node --ros-args -p input_path:=/tmp/audio.wav
+~~~
+
+在开发容器中运行 `python3 scripts/av_pipeline_test.py` 可验证重采样、Opus 首尾裁剪和同步输出。脚本生成一段音轨比视频晚 350 ms 的低帧率样片，并核对话题的时间戳、采样总数和实际发布间隔。
+
 ## 发布视频文件
 
 在容器里的第一个终端生成测试视频并启动节点：

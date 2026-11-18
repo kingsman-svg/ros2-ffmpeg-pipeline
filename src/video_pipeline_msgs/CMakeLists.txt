@@ -8,6 +8,8 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/H264Packet.msg"
   "msg/H264QueueFeedback.msg"
+  "msg/PcmAudio.msg"
+  "msg/OpusPacket.msg"
   DEPENDENCIES std_msgs
 )
 

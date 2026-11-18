@@ -1,5 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, RegisterEventHandler
+from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -15,10 +16,13 @@ def stop_on_failure(event, context):
 def generate_launch_description():
     """启动视频文件源、H.264 编码和 H.264 解码节点。"""
     fps = LaunchConfiguration('fps')
+    with_audio = LaunchConfiguration('with_audio')
     return LaunchDescription([
         DeclareLaunchArgument('input_path', description='容器内的视频文件路径'),
         DeclareLaunchArgument('fps', default_value='30', description='发布和编码帧率，使用正整数'),
         DeclareLaunchArgument('bit_rate', default_value='2000000', description='编码目标码率，单位 bit/s'),
+        DeclareLaunchArgument('with_audio', default_value='false', description='编码、解码和同步输入文件的音轨'),
+        DeclareLaunchArgument('audio_bit_rate', default_value='64000', description='Opus 目标码率，单位 bit/s'),
         DeclareLaunchArgument(
             'adaptive_bit_rate', default_value='false', description='开启自适应码率'),
         DeclareLaunchArgument('send_queue_max_packets', default_value='120', description='发送队列最大包数'),
@@ -61,6 +65,31 @@ def generate_launch_description():
                 'input_path': ParameterValue(LaunchConfiguration('input_path'), value_type=str),
                 'fps': ParameterValue(fps, value_type=float),
                 'wait_for_pipeline': True,
+                'media_timestamps': ParameterValue(with_audio, value_type=bool),
+            }],
+        ),
+        Node(
+            package='video_pipeline', executable='av_sync_node', output='screen',
+            condition=IfCondition(with_audio),
+        ),
+        Node(
+            package='video_pipeline', executable='opus_decoder_node', output='screen',
+            condition=IfCondition(with_audio), parameters=[{'announce_ready': True}],
+        ),
+        Node(
+            package='video_pipeline', executable='opus_encoder_node', output='screen',
+            condition=IfCondition(with_audio),
+            parameters=[{
+                'announce_ready': True,
+                'bit_rate': ParameterValue(LaunchConfiguration('audio_bit_rate'), value_type=int),
+            }],
+        ),
+        Node(
+            package='video_pipeline', executable='audio_file_source_node', output='screen',
+            condition=IfCondition(with_audio),
+            parameters=[{
+                'input_path': ParameterValue(LaunchConfiguration('input_path'), value_type=str),
+                'wait_for_av_start': True,
             }],
         ),
     ])

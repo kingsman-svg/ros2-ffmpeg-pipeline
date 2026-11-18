@@ -1,5 +1,6 @@
 #include "video_pipeline/media_reader.h"
 
+#include <algorithm>
 #include <cerrno>
 
 namespace video_pipeline
@@ -76,6 +77,25 @@ AVRational MediaReader::time_base() const
     return AVRational{0, 1};
   }
   return format_context_->streams[stream_index_]->time_base;
+}
+
+std::int64_t MediaReader::media_time_ns(std::int64_t pts) const
+{
+  if (format_context_ == nullptr || stream_index_ < 0) {
+    return 0;
+  }
+  const auto * stream = format_context_->streams[stream_index_];
+  if (pts == AV_NOPTS_VALUE) {
+    pts = stream->start_time;
+  }
+  if (pts == AV_NOPTS_VALUE) {
+    return 0;
+  }
+  constexpr AVRational nanos{1, 1000000000};
+  const auto time_ns = av_rescale_q(pts, stream->time_base, nanos);
+  const auto start_us = format_context_->start_time;
+  const auto origin_ns = start_us == AV_NOPTS_VALUE ? 0 : av_rescale_q(start_us, AV_TIME_BASE_Q, nanos);
+  return std::max<std::int64_t>(0, time_ns - origin_ns);
 }
 
 void MediaReader::close()

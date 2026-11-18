@@ -38,6 +38,7 @@ public:
     const auto input_path = declare_parameter<std::string>("input_path", "", startup_parameter);
     const double fps = declare_parameter<double>("fps", 30.0, startup_parameter);
     waiting_for_pipeline_ = declare_parameter<bool>("wait_for_pipeline", false, startup_parameter);
+    media_timestamps_ = declare_parameter<bool>("media_timestamps", false, startup_parameter);
     if (input_path.empty()) {
       throw std::invalid_argument("请通过 input_path 参数指定视频文件路径");
     }
@@ -47,6 +48,7 @@ public:
     if (!(period_ns >= 1.0 && period_ns < static_cast<double>(Nanoseconds::max().count()))) {
       throw std::invalid_argument("fps 必须为正数，且对应的定时器周期必须有效");
     }
+    frame_period_ns_ = static_cast<std::int64_t>(period_ns);
     if (!packet_ || !decoded_frame_ || !rgb_frame_) {
       throw std::runtime_error("分配视频数据结构失败");
     }
@@ -69,7 +71,12 @@ public:
       startup_deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
       RCLCPP_INFO(get_logger(), "等待编码和解码链路就绪");
     }
-    const Nanoseconds period(static_cast<Nanoseconds::rep>(period_ns));
+    if (media_timestamps_) {
+      av_start_subscription_ = create_subscription<std_msgs::msg::Empty>(
+        "av/start", rclcpp::QoS(1).transient_local(),
+        [this](std_msgs::msg::Empty::ConstSharedPtr) {av_ready_ = true;});
+    }
+    const auto period = media_timestamps_ ? Nanoseconds(2000000) : Nanoseconds(frame_period_ns_);
     timer_ = create_wall_timer(period, [this]() {publish_next_frame();});
     RCLCPP_INFO_STREAM(
       get_logger(), "发布视频 " << input_path << " 到 " << publisher_->get_topic_name()
@@ -107,6 +114,9 @@ private:
 
   void publish_next_frame()
   {
+    if (media_timestamps_ && !av_ready_) {
+      return;
+    }
     if (waiting_for_pipeline_) {
       if (!decoder_ready_ || publisher_->get_subscription_count() == 0 ||
         end_publisher_->get_subscription_count() == 0)
@@ -119,29 +129,32 @@ private:
       waiting_for_pipeline_ = false;
       RCLCPP_INFO(get_logger(), "视频链路已就绪，开始发布图像");
     }
-    if (!read_next_frame()) {
-      if (rclcpp::ok()) {
-        // 退出前等待可靠订阅端确认最后的图像和结束通知。
-        const auto ack_timeout = std::chrono::seconds(2);
-        if (!publisher_->wait_for_all_acked(ack_timeout)) {
-          RCLCPP_WARN(get_logger(), "等待图像传输确认超时");
-        }
-        if (!rclcpp::ok()) {
-          return;
-        }
-        std_msgs::msg::UInt64 stream_end;
-        stream_end.data = published_frames_;
-        end_publisher_->publish(stream_end);
-        if (!end_publisher_->wait_for_all_acked(ack_timeout)) {
-          RCLCPP_WARN(get_logger(), "等待结束通知确认超时");
-        }
-        RCLCPP_INFO_STREAM(get_logger(), "视频发布结束，共发布 " << published_frames_ << " 帧");
-        rclcpp::shutdown();
+    if (!frame_pending_) {
+      if (!read_next_frame()) {
+        finish();
+        return;
       }
-      return;
+      frame_pending_ = true;
+      if (media_timestamps_) {
+        if (published_frames_ == 0) {
+          media_started_at_ = std::chrono::steady_clock::now();
+        }
+        if (decoded_frame_->best_effort_timestamp != AV_NOPTS_VALUE || published_frames_ == 0) {
+          media_stamp_ns_ = reader_.media_time_ns(decoded_frame_->best_effort_timestamp);
+        } else {
+          media_stamp_ns_ += frame_period_ns_;
+        }
+      }
     }
 
-    const auto stamp = now();
+    // 首帧预先送给同步节点，其余帧按文件时间轴发送。
+    if (media_timestamps_ && published_frames_ > 0 &&
+      std::chrono::steady_clock::now() - media_started_at_ <
+      std::chrono::nanoseconds(media_stamp_ns_))
+    {
+      return;
+    }
+    const auto stamp = media_timestamps_ ? rclcpp::Time(media_stamp_ns_) : now();
     const int result = converter_.convert(decoded_frame_.get(), AV_PIX_FMT_RGB24, rgb_frame_.get());
     if (result < 0) {
       throw ffmpeg_error("转换 RGB 图像失败", result);
@@ -151,6 +164,30 @@ private:
     header.frame_id = "video_optical_frame";
     publisher_->publish(video_pipeline::make_rgb_image(*rgb_frame_, header));
     ++published_frames_;
+    frame_pending_ = false;
+  }
+
+  void finish()
+  {
+    if (!rclcpp::ok()) {
+      return;
+    }
+    // 退出前等待可靠订阅端确认最后的图像和结束通知。
+    const auto ack_timeout = std::chrono::seconds(2);
+    if (!publisher_->wait_for_all_acked(ack_timeout)) {
+      RCLCPP_WARN(get_logger(), "等待图像传输确认超时");
+    }
+    if (!rclcpp::ok()) {
+      return;
+    }
+    std_msgs::msg::UInt64 stream_end;
+    stream_end.data = published_frames_;
+    end_publisher_->publish(stream_end);
+    if (!end_publisher_->wait_for_all_acked(ack_timeout)) {
+      RCLCPP_WARN(get_logger(), "等待结束通知确认超时");
+    }
+    RCLCPP_INFO_STREAM(get_logger(), "视频发布结束，共发布 " << published_frames_ << " 帧");
+    rclcpp::shutdown();
   }
 
   video_pipeline::MediaReader reader_;
@@ -163,8 +200,15 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher_;
   rclcpp::Publisher<std_msgs::msg::UInt64>::SharedPtr end_publisher_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr decoder_ready_subscription_;
+  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr av_start_subscription_;
   bool waiting_for_pipeline_ = false;
   bool decoder_ready_ = false;
+  bool media_timestamps_ = false;
+  bool av_ready_ = false;
+  bool frame_pending_ = false;
+  std::int64_t frame_period_ns_ = 0;
+  std::int64_t media_stamp_ns_ = 0;
+  std::chrono::steady_clock::time_point media_started_at_;
   std::chrono::steady_clock::time_point startup_deadline_;
   rclcpp::TimerBase::SharedPtr timer_;
 };

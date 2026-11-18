@@ -1,6 +1,7 @@
 #ifndef VIDEO_PIPELINE_MEDIA_READER_H_
 #define VIDEO_PIPELINE_MEDIA_READER_H_
 
+#include <cstdint>
 #include <string>
 
 extern "C" {
@@ -28,6 +29,8 @@ public:
   // 返回的指针由 MediaReader 持有，关闭或重新打开输入后失效。
   const AVCodecParameters * codec_parameters() const;
   AVRational time_base() const;
+  // 将流时间戳换算到文件的共同时间轴。缺省时使用流起点。
+  std::int64_t media_time_ns(std::int64_t pts) const;
 
   void close();
 
