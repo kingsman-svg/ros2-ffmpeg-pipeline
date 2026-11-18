@@ -7,6 +7,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -116,7 +117,22 @@ public:
 private:
   void log_queue_stats()
   {
-    RCLCPP_INFO_STREAM(get_logger(), "H.264 发送队列：" << send_queue_->stats());
+    video_pipeline::H264PacketQueueStats queue_stats;
+    std::uint64_t published_packets;
+    std::uint64_t published_payload_bytes;
+    {
+      // 读取出队数时固定发布计数，至多有一个包已出队但尚未计入发布。
+      std::lock_guard<std::mutex> lock(publish_stats_mutex_);
+      queue_stats = send_queue_->stats();
+      published_packets = total_published_packets_;
+      published_payload_bytes = total_published_payload_bytes_;
+    }
+    RCLCPP_INFO_STREAM(get_logger(), "H.264 发送队列：" << queue_stats);
+    // 当前 PTS 从零开始，每成功送入一帧加一，也就是累计输入帧数。
+    RCLCPP_INFO_STREAM(
+      get_logger(), "H.264 编码端累计：输入 " << next_pts_ << " 帧，入队 " <<
+        queue_stats.total_enqueued_packets << " 包，出队 " << queue_stats.total_dequeued_packets <<
+        " 包，发布 " << published_packets << " 包，数据 " << published_payload_bytes << " 字节");
     if (!latest_decode_feedback_) {
       RCLCPP_INFO(get_logger(), "H.264 解码队列反馈：尚未收到");
       return;
@@ -157,6 +173,11 @@ private:
         break;
       }
       publisher_->publish(*packet);
+      {
+        std::lock_guard<std::mutex> lock(publish_stats_mutex_);
+        ++total_published_packets_;
+        total_published_payload_bytes_ += packet->data.size();
+      }
     }
     if (!rclcpp::ok()) {
       return;
@@ -169,6 +190,9 @@ private:
     if (!publisher_->wait_for_all_acked(std::chrono::seconds(2))) {
       RCLCPP_WARN(get_logger(), "等待 H.264 传输确认超时");
     }
+    RCLCPP_INFO_STREAM(
+      get_logger(), "H.264 发送结束，共发布 " << total_published_packets_ << " 包，数据 " <<
+        total_published_payload_bytes_ << " 字节");
     rclcpp::shutdown();
   }
 
@@ -333,6 +357,9 @@ private:
   rclcpp::TimerBase::SharedPtr end_timer_;
   std::unique_ptr<H264PacketQueue> send_queue_;
   rclcpp::TimerBase::SharedPtr stats_timer_;
+  std::mutex publish_stats_mutex_;
+  std::uint64_t total_published_packets_ = 0;
+  std::uint64_t total_published_payload_bytes_ = 0;
   std::exception_ptr send_error_;
   std::thread send_thread_;
 };
