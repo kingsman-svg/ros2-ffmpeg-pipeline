@@ -1,12 +1,13 @@
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <memory>
 #include <string>
-#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/audio_fifo.h>
 #include <libavutil/opt.h>
 }
 
@@ -32,7 +33,10 @@ class OpusEncoderNode : public rclcpp::Node
 public:
   OpusEncoderNode()
   : Node("opus_encoder"), encoder_(nullptr, free_context), frame_(av_frame_alloc()),
-    packet_(av_packet_alloc())
+    packet_(av_packet_alloc()),
+    // 上次剩余的采样加上当前消息，最多占两帧。
+    pcm_fifo_(av_audio_fifo_alloc(AV_SAMPLE_FMT_S16, kAudioChannels, 2 * kAudioBlockSamples),
+      av_audio_fifo_free)
   {
     const auto bit_rate = declare_parameter<std::int64_t>("bit_rate", 64000);
     const auto * codec = avcodec_find_encoder_by_name("libopus");
@@ -40,7 +44,7 @@ public:
       throw std::runtime_error("当前 FFmpeg 没有 libopus 编码器");
     }
     encoder_.reset(avcodec_alloc_context3(codec));
-    if (!encoder_ || !frame_ || !packet_ || bit_rate <= 0) {
+    if (!encoder_ || !frame_ || !packet_ || !pcm_fifo_ || bit_rate <= 0) {
       throw std::invalid_argument("Opus 码率或编码缓冲无效");
     }
     encoder_->sample_fmt = AV_SAMPLE_FMT_S16;
@@ -97,12 +101,20 @@ private:
       finish();
       return;
     }
-    received_samples_ += pcm.samples_per_channel;
-    pending_.insert(pending_.end(), pcm.data.begin(), pcm.data.end());
-    constexpr auto block_bytes = kAudioBlockSamples * kPcmBytesPerFrame;
-    if (pending_.size() >= block_bytes) {
+    // ROS 消息使用小端字节序，FIFO 使用 FFmpeg 的本机 S16 样本。
+    std::array<std::uint16_t, kAudioBlockSamples * kAudioChannels> native_pcm;
+    for (std::size_t i = 0; i < pcm.data.size() / sizeof(std::uint16_t); ++i) {
+      native_pcm[i] = AV_RL16(pcm.data.data() + i * sizeof(std::uint16_t));
+    }
+    void * input_planes[] = {native_pcm.data()};
+    const int samples = static_cast<int>(pcm.samples_per_channel);
+    const int written = av_audio_fifo_write(pcm_fifo_.get(), input_planes, samples);
+    if (written < 0) {
+      throw ffmpeg_error("写入 PCM FIFO 失败", written);
+    }
+    received_samples_ += written;
+    if (av_audio_fifo_size(pcm_fifo_.get()) >= kAudioBlockSamples) {
       encode_block(kAudioBlockSamples);
-      pending_.erase(pending_.begin(), pending_.begin() + block_bytes);
     }
   }
 
@@ -113,8 +125,10 @@ private:
     if (result < 0) {
       throw ffmpeg_error("使 Opus 输入帧可写失败", result);
     }
-    for (int i = 0; i < samples * kPcmBytesPerFrame; i += 2) {
-      AV_WN16(frame_->data[0] + i, AV_RL16(pending_.data() + i));
+    void * output_planes[] = {frame_->data[0]};
+    result = av_audio_fifo_read(pcm_fifo_.get(), output_planes, samples);
+    if (result != samples) {
+      throw ffmpeg_error("读取 PCM FIFO 失败", result < 0 ? result : AVERROR_BUG);
     }
     frame_->pts = submitted_samples_;
     result = avcodec_send_frame(encoder_.get(), frame_.get());
@@ -156,8 +170,9 @@ private:
 
   void finish()
   {
-    if (!pending_.empty()) {
-      encode_block(pending_.size() / kPcmBytesPerFrame);
+    const int remaining_samples = av_audio_fifo_size(pcm_fifo_.get());
+    if (remaining_samples > 0) {
+      encode_block(remaining_samples);
     }
     if (submitted_samples_ > 0) {
       const int result = avcodec_send_frame(encoder_.get(), nullptr);
@@ -182,7 +197,7 @@ private:
   std::unique_ptr<AVCodecContext, decltype(&free_context)> encoder_;
   std::unique_ptr<AVFrame, FrameDeleter> frame_;
   std::unique_ptr<AVPacket, PacketDeleter> packet_;
-  std::vector<std::uint8_t> pending_;
+  std::unique_ptr<AVAudioFifo, decltype(&av_audio_fifo_free)> pcm_fifo_;
   std::uint64_t received_samples_ = 0;
   std::int64_t submitted_samples_ = 0;
   std::int64_t origin_ns_ = 0;
