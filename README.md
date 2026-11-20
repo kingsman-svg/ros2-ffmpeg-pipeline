@@ -2,16 +2,36 @@
 
 当前实现了音视频文件读取、解码、H.264 视频编码、视频像素格式转换和音频重采样的基础封装。视频文件经发布节点输出 RGB 图像，编码节点将图像压缩为 H.264，解码节点再输出 RGB 图像。
 
-当前开发容器运行 ROS 2 Humble。构建：
+## Docker 快速开始
+
+在仓库根目录构建镜像并运行内置演示。镜像基于 Ubuntu 22.04 和 ROS 2 Humble。
 
 ~~~bash
-cd /workspaces/ros2/ffmpeg_pipline_ws
+docker build -t ros2-ffmpeg-pipeline:0.1.0 .
+docker run --rm ros2-ffmpeg-pipeline:0.1.0
+~~~
+
+演示会生成 30 帧 `320×240` 的测试视频，由软件编码端缩放到 `160×120`，再经过 H.264 解码。终端会打印编码尺寸和解码帧数，处理结束后容器自动退出。
+
+也可以把本地视频目录挂到容器中，运行同一条软件链路。将 `/path/to/videos` 和 `input.mp4` 替换为实际路径和文件名。
+
+~~~bash
+docker run --rm -v /path/to/videos:/videos:ro ros2-ffmpeg-pipeline:0.1.0 \
+  ros2 launch video_pipeline video_pipeline.launch.py \
+  input_path:=/videos/input.mp4 encoder_backend:=software decoder_backend:=software
+~~~
+
+## ROS 2 工作区构建
+
+已经安装 ROS 2 Humble 时，可以在仓库根目录构建。
+
+~~~bash
 source /opt/ros/humble/setup.bash
 colcon build --packages-up-to video_pipeline
 source install/setup.bash
 ~~~
 
-若重建容器，需要安装开发依赖：
+手动搭建环境时，所需开发依赖如下。
 
 ~~~bash
 apt-get update
@@ -121,7 +141,7 @@ ros2 run video_pipeline video_file_source_node --ros-args \
 
 ~~~bash
 source /opt/ros/humble/setup.bash
-source /workspaces/ros2/ffmpeg_pipline_ws/install/setup.bash
+source install/setup.bash
 ros2 topic list -t
 ros2 topic info /video/image_raw --verbose
 cat "$(ros2 pkg prefix --share sensor_msgs)/msg/Image.msg"
@@ -138,7 +158,7 @@ ros2 topic hz /video/image_raw
 
 ~~~bash
 source /opt/ros/humble/setup.bash
-source /workspaces/ros2/ffmpeg_pipline_ws/install/setup.bash
+source install/setup.bash
 ros2 run video_pipeline h264_encoder_node --ros-args -p fps:=10 -p bit_rate:=2000000
 ~~~
 
@@ -148,7 +168,7 @@ ros2 run video_pipeline h264_encoder_node --ros-args -p fps:=10 -p bit_rate:=200
 
 ~~~bash
 source /opt/ros/humble/setup.bash
-source /workspaces/ros2/ffmpeg_pipline_ws/install/setup.bash
+source install/setup.bash
 ros2 topic info /video/h264 --verbose
 ros2 interface show video_pipeline_msgs/msg/H264Packet
 ros2 topic echo /video/h264 --once --no-arr
@@ -163,7 +183,7 @@ ros2 topic bw /video/h264
 
 ~~~bash
 source /opt/ros/humble/setup.bash
-source /workspaces/ros2/ffmpeg_pipline_ws/install/setup.bash
+source install/setup.bash
 ros2 run video_pipeline h264_decoder_node
 ~~~
 
