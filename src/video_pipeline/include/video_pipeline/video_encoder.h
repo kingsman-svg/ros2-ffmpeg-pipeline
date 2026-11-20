@@ -6,6 +6,7 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/dict.h>
 }
 
 namespace video_pipeline
@@ -37,7 +38,8 @@ public:
   VideoEncoder & operator=(const VideoEncoder &) = delete;
 
   // 创建 H.264 编码器；encoder_name 为空时使用 FFmpeg 默认编码器。
-  int open(const VideoEncoderConfig & config);
+  // FFmpeg 会从 options 取出识别的选项，调用者负责释放剩余字典。
+  int open(const VideoEncoderConfig & config, AVDictionary ** options = nullptr);
 
   // 输入帧的 PTS 使用 time_base() 的单位；传入 nullptr 表示输入结束。
   int send_frame(const AVFrame * frame);

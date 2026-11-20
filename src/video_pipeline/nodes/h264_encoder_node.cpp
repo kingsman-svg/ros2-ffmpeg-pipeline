@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
 
@@ -30,6 +31,7 @@ extern "C" {
 #include "video_pipeline/h264_encoder_strategy.h"
 #include "video_pipeline/h264_packet_queue.h"
 #include "video_pipeline/image_converter.h"
+#include "video_pipeline/nvenc_h264_encoder_strategy.h"
 #include "video_pipeline_msgs/msg/h264_packet.hpp"
 #include "video_pipeline_msgs/msg/h264_queue_feedback.hpp"
 
@@ -70,8 +72,8 @@ class H264EncoderNode : public rclcpp::Node
 {
 public:
   H264EncoderNode()
-  : Node("h264_encoder"), encoder_strategy_(new video_pipeline::SoftwareH264EncoderStrategy()),
-    rgb_frame_(av_frame_alloc()), yuv_frame_(av_frame_alloc()), packet_(av_packet_alloc())
+  : Node("h264_encoder"), rgb_frame_(av_frame_alloc()), yuv_frame_(av_frame_alloc()),
+    packet_(av_packet_alloc())
   {
     if (!rgb_frame_ || !yuv_frame_ || !packet_) {
       throw std::runtime_error("分配编码数据结构失败");
@@ -79,6 +81,10 @@ public:
 
     rcl_interfaces::msg::ParameterDescriptor startup_parameter;
     startup_parameter.read_only = true;
+    encoder_backend_ = declare_parameter<std::string>("encoder_backend", "auto", startup_parameter);
+    if (encoder_backend_ != "auto" && encoder_backend_ != "software" && encoder_backend_ != "nvenc") {
+      throw std::invalid_argument("encoder_backend 必须是 auto、software 或 nvenc");
+    }
     const auto fps = declare_parameter<std::int64_t>("fps", 30, startup_parameter);
     encoder_config_.bit_rate = declare_parameter<std::int64_t>("bit_rate", 2000000, startup_parameter);
     if (fps <= 0 || fps > std::numeric_limits<int>::max() || encoder_config_.bit_rate <= 0) {
@@ -106,6 +112,9 @@ public:
 
     encoder_config_.gop_size = encoder_config_.frames_per_second;
     if (declare_parameter<bool>("adaptive_bit_rate", false, startup_parameter)) {
+      if (encoder_backend_ == "nvenc") {
+        throw std::invalid_argument("NVENC 当前只支持固定目标码率，请关闭 adaptive_bit_rate");
+      }
       bitrate_controller_ = std::make_unique<BitrateController>(encoder_config_.bit_rate);
       encoder_config_.vbv_buffer_size =
         static_cast<int>(std::max<std::int64_t>(1000, encoder_config_.bit_rate / 2));
@@ -367,14 +376,40 @@ private:
     if (buffer_result < 0) {
       throw ffmpeg_error("分配 RGB 输入缓冲失败", buffer_result);
     }
-    const int open_result = encoder_strategy_->open(encoder_config_);
-    if (open_result < 0) {
-      throw ffmpeg_error("打开 H.264 编码器失败", open_result);
-    }
+    open_encoder_strategy();
     RCLCPP_INFO_STREAM(
       get_logger(), "开始编码，输入 " << rgb_frame_->width << "x" << rgb_frame_->height
                                     << "，输出 " << encoder_config_.width << "x" << encoder_config_.height
                                     << "，" << encoder_config_.frames_per_second << " fps");
+  }
+
+  void open_encoder_strategy()
+  {
+    // 用首帧确定的宽高尝试打开 NVENC，成功打开后才开始送帧。
+    if (encoder_backend_ != "software" && !bitrate_controller_) {
+      encoder_strategy_.reset(new video_pipeline::NvencH264EncoderStrategy());
+      const int result = encoder_strategy_->open(encoder_config_);
+      if (result >= 0) {
+        RCLCPP_INFO(get_logger(), "H.264 编码后端为 NVENC (h264_nvenc)");
+        return;
+      }
+      const auto error = ffmpeg_error("打开 NVENC 编码器失败", result);
+      if (encoder_backend_ == "nvenc") {
+        throw error;
+      }
+      RCLCPP_WARN_STREAM(get_logger(), error.what() << "，回退到 libx264");
+    }
+
+    encoder_strategy_.reset(new video_pipeline::SoftwareH264EncoderStrategy());
+    const int result = encoder_strategy_->open(encoder_config_);
+    if (result < 0) {
+      throw ffmpeg_error("打开 libx264 编码器失败", result);
+    }
+    if (encoder_backend_ == "auto" && bitrate_controller_) {
+      RCLCPP_INFO(get_logger(), "自适应码率已启用，H.264 编码后端为 libx264");
+    } else {
+      RCLCPP_INFO(get_logger(), "H.264 编码后端为 libx264");
+    }
   }
 
   void encode_image(const Image & image)
@@ -495,6 +530,7 @@ private:
     send_queue_->close();
   }
 
+  std::string encoder_backend_;
   std::unique_ptr<video_pipeline::H264EncoderStrategy> encoder_strategy_;
   video_pipeline::VideoEncoderConfig encoder_config_;
   std::unique_ptr<BitrateController> bitrate_controller_;

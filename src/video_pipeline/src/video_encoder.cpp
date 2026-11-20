@@ -20,7 +20,7 @@ VideoEncoder::~VideoEncoder()
   close();
 }
 
-int VideoEncoder::open(const VideoEncoderConfig & config)
+int VideoEncoder::open(const VideoEncoderConfig & config, AVDictionary ** options)
 {
   close();
   if (config.width <= 0 || config.height <= 0 || config.frames_per_second <= 0 ||
@@ -75,10 +75,14 @@ int VideoEncoder::open(const VideoEncoderConfig & config)
     }
   }
 
-  const int result = avcodec_open2(codec_context_, codec, nullptr);
+  const int result = avcodec_open2(codec_context_, codec, options);
   if (result < 0) {
     close();
     return result;
+  }
+  if (options != nullptr && av_dict_count(*options) != 0) {
+    close();
+    return AVERROR_OPTION_NOT_FOUND;
   }
   return 0;
 }

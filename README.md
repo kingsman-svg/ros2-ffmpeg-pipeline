@@ -42,6 +42,23 @@ ros2 launch video_pipeline video_pipeline.launch.py \
 
 两个参数默认都是 `0`，指定缩放时两项都必须是正偶数。两个值就是目标尺寸，按原画面宽高比选择目标值可避免拉伸。在 `/video/image_raw` 可查看输入尺寸，在 `/video/decoded_image` 可查看编码后解出的尺寸。
 
+### 选择 H.264 编码后端
+
+| `encoder_backend` | 启动行为 |
+|---|---|
+| `auto`（默认） | 按实际尺寸尝试打开 NVENC，失败时记录原因并使用 `libx264`。开启自适应码率时选用 `libx264`。 |
+| `software` | 使用 `libx264` 软件编码。 |
+| `nvenc` | 要求 FFmpeg 的 `h264_nvenc` 能成功打开，失败时结束运行。当前采用固定目标码率。 |
+
+在有 NVENC 的 NVIDIA Linux 主机上运行。使用容器时，需把 GPU 和 `video` 驱动能力提供给容器，并使用带 `h264_nvenc` 的 FFmpeg。[NVIDIA 容器驱动能力](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/docker-specialized.html#driver-capabilities)
+
+~~~bash
+ros2 launch video_pipeline video_pipeline.launch.py \
+  input_path:=/tmp/input.mp4 encoder_backend:=nvenc adaptive_bit_rate:=false
+~~~
+
+编码节点收到首张图后会打印选中的后端。可从 `/video/decoded_image` 核对 NVENC 编码经软件解码后的图像。单独启动编码节点时，用 `--ros-args -p encoder_backend:=nvenc` 指定后端。
+
 ## 音频话题与音视频同步
 
 在现有 launch 上添加 `with_audio:=true`，从同一个文件读取视频和连续音轨。Opus 编码默认 64 kb/s，可通过 `audio_bit_rate` 设置。
@@ -108,7 +125,7 @@ source /workspaces/ros2/ffmpeg_pipline_ws/install/setup.bash
 ros2 run video_pipeline h264_encoder_node --ros-args -p fps:=10 -p bit_rate:=2000000
 ~~~
 
-编码端的 `fps` 使用整数，示例与视频发布端的 `10.0` 对应。`bit_rate` 单位为 bit/s。编码节点从 `/video/image_raw` 接收固定尺寸的 `rgb8` 图像，将其转为 YUV420P，再通过 `libx264` 编码。编码宽高均须为偶数，单独启动节点时可用 `-p output_width:=1280 -p output_height:=720` 指定。图像和编码包使用可靠 QoS。一次运行处理一个文件，编码端需要在源节点发布第一帧前完成订阅。
+编码端的 `fps` 使用整数，示例与视频发布端的 `10.0` 对应。`bit_rate` 单位为 bit/s。编码节点从 `/video/image_raw` 接收固定尺寸的 `rgb8` 图像，将其转为 YUV420P，再用选定的后端编码。编码宽高均须为偶数，单独启动节点时可用 `-p output_width:=1280 -p output_height:=720` 指定。图像和编码包使用可靠 QoS。一次运行处理一个文件，编码端需要在源节点发布第一帧前完成订阅。
 
 发布期间，在另一个容器终端查看自定义消息、关键帧标记和带宽。
 
