@@ -19,6 +19,7 @@
 #include "std_msgs/msg/header.hpp"
 
 #include "video_pipeline/ffmpeg_resources.h"
+#include "video_pipeline/h264_annex_b_parser.h"
 #include "video_pipeline/h264_packet_queue.h"
 #include "video_pipeline/image_converter.h"
 #include "video_pipeline/media_decoder.h"
@@ -203,28 +204,49 @@ private:
 
   void decode_packet(const H264Packet & message)
   {
-    // 中途加入时从关键帧开始，避免把缺少参考帧的包送给解码器。
-    if (waiting_for_key_frame_ && !message.key_frame) {
-      return;
+    video_pipeline::H264AnnexBParser::StartPacketPlan start_plan;
+    if (!decoding_started_) {
+      start_plan = bitstream_parser_.inspect_start_packet(message.data);
+      if (!start_plan.ready) {
+        return;
+      }
+    }
+    std::size_t parameter_size = 0;
+    if (start_plan.sps != nullptr) {
+      parameter_size = start_plan.sps->size() + start_plan.pps->size();
     }
     const auto max_packet_size = static_cast<std::size_t>(
       std::numeric_limits<int>::max() - AV_INPUT_BUFFER_PADDING_SIZE);
     if (message.data.empty() || message.data.size() > max_packet_size ||
-      message.pts == AV_NOPTS_VALUE)
+      parameter_size > max_packet_size - message.data.size() || message.pts == AV_NOPTS_VALUE)
     {
       throw std::invalid_argument("H.264 数据包大小或 PTS 无效");
     }
 
     // av_new_packet 会在数据末尾分配 FFmpeg 解码所需的零填充。
     av_packet_unref(packet_.get());
-    const int allocation_result = av_new_packet(packet_.get(), static_cast<int>(message.data.size()));
+    const int allocation_result = av_new_packet(
+      packet_.get(), static_cast<int>(message.data.size() + parameter_size));
     if (allocation_result < 0) {
       throw ffmpeg_error("分配 H.264 数据包失败", allocation_result);
     }
-    std::memcpy(packet_->data, message.data.data(), message.data.size());
+    if (parameter_size == 0) {
+      std::memcpy(packet_->data, message.data.data(), message.data.size());
+    } else {
+      // 按解析器给出的顺序把参数直接写入最终缓冲区。
+      const std::size_t offset = start_plan.insertion_offset;
+      std::memcpy(packet_->data, message.data.data(), offset);
+      std::memcpy(packet_->data + offset, start_plan.sps->data(), start_plan.sps->size());
+      std::memcpy(
+        packet_->data + offset + start_plan.sps->size(), start_plan.pps->data(),
+        start_plan.pps->size());
+      std::memcpy(
+        packet_->data + offset + parameter_size, message.data.data() + offset,
+        message.data.size() - offset);
+    }
     packet_->pts = message.pts;
     packet_->dts = message.dts;
-    if (message.key_frame) {
+    if (!decoding_started_ || message.key_frame) {
       packet_->flags |= AV_PKT_FLAG_KEY;
     }
 
@@ -235,7 +257,7 @@ private:
     if (send_result < 0) {
       throw ffmpeg_error("送入 H.264 数据包失败", send_result);
     }
-    waiting_for_key_frame_ = false;
+    decoding_started_ = true;
     // 解码可能延迟或重排，按 PTS 找回每帧自己的 ROS 头部。
     if (!input_headers_.emplace(message.pts, message.header).second) {
       throw std::invalid_argument("收到重复的 H.264 PTS");
@@ -276,7 +298,7 @@ private:
 
   void finish_stream()
   {
-    if (!waiting_for_key_frame_) {
+    if (decoding_started_) {
       DecodeStageStats stats;
       const auto decode_started_at = SteadyClock::now();
       const int send_result = decoder_.send_packet(nullptr);
@@ -302,12 +324,13 @@ private:
   }
 
   video_pipeline::MediaDecoder decoder_;
+  video_pipeline::H264AnnexBParser bitstream_parser_;
   video_pipeline::ImageConverter converter_;
   std::unique_ptr<AVPacket, PacketDeleter> packet_;
   std::unique_ptr<AVFrame, FrameDeleter> decoded_frame_;
   std::unique_ptr<AVFrame, FrameDeleter> rgb_frame_;
   std::map<std::int64_t, std_msgs::msg::Header> input_headers_;
-  bool waiting_for_key_frame_ = true;
+  bool decoding_started_ = false;
   const SteadyClock::time_point started_at_ = SteadyClock::now();
   std::mutex stage_stats_mutex_;
   DecodeStageStats total_stage_stats_;

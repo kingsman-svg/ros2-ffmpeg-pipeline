@@ -124,7 +124,7 @@ source /workspaces/ros2/ffmpeg_pipline_ws/install/setup.bash
 ros2 run video_pipeline h264_decoder_node
 ~~~
 
-解码节点订阅 `/video/h264`，从关键帧开始解码，将输出帧转成 `rgb8` 并发布到 `/video/decoded_image`。输出类型为 `sensor_msgs/msg/Image`，保留原图像的 ROS 时间戳和 `frame_id`。收到 `end_of_stream` 后，节点先发布解码器中剩余的帧，再打印发布帧数并退出。
+解码节点订阅 `/video/h264`，启动时解析 Annex B 数据并缓存收到的 SPS 和 PPS。遇到 IDR 时，按其引用的 ID 查找对应的 PPS 和 SPS，参数齐全后才开始解码。如果参数此前已单独收到，节点会将缓存的参数补入首个 IDR 包。输出帧转成 `rgb8` 并发布到 `/video/decoded_image`，类型为 `sensor_msgs/msg/Image`，保留原图像的 ROS 时间戳和 `frame_id`。收到 `end_of_stream` 后，节点先发布解码器中剩余的帧，再打印发布帧数并退出。
 
 在播完前，用另一个已加载环境的终端运行以下命令查看图像和帧率。
 

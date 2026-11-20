@@ -48,6 +48,14 @@ set_target_properties(bitrate_controller PROPERTIES
   CXX_EXTENSIONS NO
 )
 
+add_library(h264_annex_b_parser STATIC src/h264_annex_b_parser.cpp)
+target_include_directories(h264_annex_b_parser PUBLIC include)
+set_target_properties(h264_annex_b_parser PROPERTIES
+  CXX_STANDARD 11
+  CXX_STANDARD_REQUIRED YES
+  CXX_EXTENSIONS NO
+)
+
 add_executable(ffmpeg_video_probe src/ffmpeg_video_probe.cpp)
 target_link_libraries(ffmpeg_video_probe PRIVATE ffmpeg_video)
 set_target_properties(ffmpeg_video_probe PROPERTIES
@@ -84,7 +92,7 @@ set_target_properties(h264_encoder_node PROPERTIES
 
 add_executable(h264_decoder_node nodes/h264_decoder_node.cpp)
 ament_target_dependencies(h264_decoder_node rclcpp rcl_interfaces sensor_msgs std_msgs video_pipeline_msgs)
-target_link_libraries(h264_decoder_node ffmpeg_video h264_packet_queue)
+target_link_libraries(h264_decoder_node ffmpeg_video h264_packet_queue h264_annex_b_parser)
 set_target_properties(h264_decoder_node PROPERTIES
   CXX_STANDARD 14
   CXX_STANDARD_REQUIRED YES
@@ -115,6 +123,14 @@ if(BUILD_TESTING)
   add_executable(bitrate_controller_test test/bitrate_controller_test.cpp)
   target_link_libraries(bitrate_controller_test bitrate_controller)
   add_test(NAME bitrate_controller_test COMMAND bitrate_controller_test)
+  add_executable(h264_annex_b_parser_test test/h264_annex_b_parser_test.cpp)
+  target_link_libraries(h264_annex_b_parser_test h264_annex_b_parser)
+  set_target_properties(h264_annex_b_parser_test PROPERTIES
+    CXX_STANDARD 11
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+  )
+  add_test(NAME h264_annex_b_parser_test COMMAND h264_annex_b_parser_test)
 endif()
 
 ament_package()
