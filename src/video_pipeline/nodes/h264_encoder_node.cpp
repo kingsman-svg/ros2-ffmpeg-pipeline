@@ -27,9 +27,9 @@ extern "C" {
 
 #include "video_pipeline/bitrate_controller.h"
 #include "video_pipeline/ffmpeg_resources.h"
+#include "video_pipeline/h264_encoder_strategy.h"
 #include "video_pipeline/h264_packet_queue.h"
 #include "video_pipeline/image_converter.h"
-#include "video_pipeline/video_encoder.h"
 #include "video_pipeline_msgs/msg/h264_packet.hpp"
 #include "video_pipeline_msgs/msg/h264_queue_feedback.hpp"
 
@@ -70,8 +70,8 @@ class H264EncoderNode : public rclcpp::Node
 {
 public:
   H264EncoderNode()
-  : Node("h264_encoder"), rgb_frame_(av_frame_alloc()), yuv_frame_(av_frame_alloc()),
-    packet_(av_packet_alloc())
+  : Node("h264_encoder"), encoder_strategy_(new video_pipeline::SoftwareH264EncoderStrategy()),
+    rgb_frame_(av_frame_alloc()), yuv_frame_(av_frame_alloc()), packet_(av_packet_alloc())
   {
     if (!rgb_frame_ || !yuv_frame_ || !packet_) {
       throw std::runtime_error("分配编码数据结构失败");
@@ -105,8 +105,6 @@ public:
     }
 
     encoder_config_.gop_size = encoder_config_.frames_per_second;
-    encoder_config_.encoder_name = "libx264";
-    encoder_config_.tune = "zerolatency";
     if (declare_parameter<bool>("adaptive_bit_rate", false, startup_parameter)) {
       bitrate_controller_ = std::make_unique<BitrateController>(encoder_config_.bit_rate);
       encoder_config_.vbv_buffer_size =
@@ -286,7 +284,7 @@ private:
     }
     // 定时器和图像回调都由节点执行器串行调用，更新会在下一帧编码时生效。
     const auto previous_rate = encoder_config_.bit_rate;
-    const int result = encoder_.set_bit_rate(decision.bit_rate);
+    const int result = encoder_strategy_->set_bit_rate(decision.bit_rate);
     if (result < 0) {
       throw ffmpeg_error("更新 H.264 目标码率失败", result);
     }
@@ -369,7 +367,7 @@ private:
     if (buffer_result < 0) {
       throw ffmpeg_error("分配 RGB 输入缓冲失败", buffer_result);
     }
-    const int open_result = encoder_.open(encoder_config_);
+    const int open_result = encoder_strategy_->open(encoder_config_);
     if (open_result < 0) {
       throw ffmpeg_error("打开 H.264 编码器失败", open_result);
     }
@@ -413,7 +411,7 @@ private:
 
     // 编码器可能延迟输出，按 PTS 保留对应输入帧的 ROS 时间戳和坐标系。
     yuv_frame_->pts = next_pts_;
-    const int send_result = encoder_.send_frame(yuv_frame_.get());
+    const int send_result = encoder_strategy_->send_frame(yuv_frame_.get());
     if (send_result < 0) {
       throw ffmpeg_error("送入待编码视频帧失败", send_result);
     }
@@ -428,9 +426,9 @@ private:
 
   int queue_encoded_packets()
   {
-    const AVRational time_base = encoder_.time_base();
+    const AVRational time_base = encoder_strategy_->time_base();
     while (true) {
-      const int result = encoder_.receive_packet(packet_.get());
+      const int result = encoder_strategy_->receive_packet(packet_.get());
       if (result < 0) {
         return result;
       }
@@ -480,7 +478,7 @@ private:
       end_timer_->cancel();
     }
     if (next_pts_ > 0) {
-      const int result = encoder_.send_frame(nullptr);
+      const int result = encoder_strategy_->send_frame(nullptr);
       if (result < 0) {
         throw ffmpeg_error("排空 H.264 编码器失败", result);
       }
@@ -497,7 +495,7 @@ private:
     send_queue_->close();
   }
 
-  video_pipeline::VideoEncoder encoder_;
+  std::unique_ptr<video_pipeline::H264EncoderStrategy> encoder_strategy_;
   video_pipeline::VideoEncoderConfig encoder_config_;
   std::unique_ptr<BitrateController> bitrate_controller_;
   std::deque<EncoderSample> samples_;

@@ -20,9 +20,9 @@
 
 #include "video_pipeline/ffmpeg_resources.h"
 #include "video_pipeline/h264_annex_b_parser.h"
+#include "video_pipeline/h264_decoder_strategy.h"
 #include "video_pipeline/h264_packet_queue.h"
 #include "video_pipeline/image_converter.h"
-#include "video_pipeline/media_decoder.h"
 #include "video_pipeline/rgb_image_message.h"
 #include "video_pipeline_msgs/msg/h264_packet.hpp"
 #include "video_pipeline_msgs/msg/h264_queue_feedback.hpp"
@@ -57,8 +57,8 @@ class H264DecoderNode : public rclcpp::Node
 {
 public:
   H264DecoderNode()
-  : Node("h264_decoder"), packet_(av_packet_alloc()), decoded_frame_(av_frame_alloc()),
-    rgb_frame_(av_frame_alloc())
+  : Node("h264_decoder"), decoder_strategy_(new video_pipeline::SoftwareH264DecoderStrategy()),
+    packet_(av_packet_alloc()), decoded_frame_(av_frame_alloc()), rgb_frame_(av_frame_alloc())
   {
     if (!packet_ || !decoded_frame_ || !rgb_frame_) {
       throw std::runtime_error("分配解码数据结构失败");
@@ -70,18 +70,7 @@ public:
     const auto max_bytes = declare_parameter<std::int64_t>("queue_max_bytes", 8 * 1024 * 1024, startup_parameter);
     decode_queue_ = std::make_unique<H264PacketQueue>("H.264 解码队列", max_packets, max_bytes);
 
-    // Annex B 流中的 SPS 和 PPS 会提供宽高等参数，初始化时只需指定编码格式。
-    auto free_parameters = [](AVCodecParameters * parameters) {
-        avcodec_parameters_free(&parameters);
-      };
-    std::unique_ptr<AVCodecParameters, decltype(free_parameters)> parameters(
-      avcodec_parameters_alloc(), free_parameters);
-    if (!parameters) {
-      throw std::runtime_error("分配解码参数失败");
-    }
-    parameters->codec_type = AVMEDIA_TYPE_VIDEO;
-    parameters->codec_id = AV_CODEC_ID_H264;
-    const int result = decoder_.open(parameters.get());
+    const int result = decoder_strategy_->open();
     if (result < 0) {
       throw ffmpeg_error("打开 H.264 解码器失败", result);
     }
@@ -252,7 +241,7 @@ private:
 
     DecodeStageStats stats;
     const auto decode_started_at = SteadyClock::now();
-    const int send_result = decoder_.send_packet(packet_.get());
+    const int send_result = decoder_strategy_->send_packet(packet_.get());
     stats.decode_time += SteadyClock::now() - decode_started_at;
     if (send_result < 0) {
       throw ffmpeg_error("送入 H.264 数据包失败", send_result);
@@ -273,7 +262,7 @@ private:
   {
     while (true) {
       const auto decode_started_at = SteadyClock::now();
-      const int result = decoder_.receive_frame(decoded_frame_.get());
+      const int result = decoder_strategy_->receive_frame(decoded_frame_.get());
       stats.decode_time += SteadyClock::now() - decode_started_at;
       if (result < 0) {
         return result;
@@ -301,7 +290,7 @@ private:
     if (decoding_started_) {
       DecodeStageStats stats;
       const auto decode_started_at = SteadyClock::now();
-      const int send_result = decoder_.send_packet(nullptr);
+      const int send_result = decoder_strategy_->send_packet(nullptr);
       stats.decode_time += SteadyClock::now() - decode_started_at;
       if (send_result < 0) {
         throw ffmpeg_error("排空 H.264 解码器失败", send_result);
@@ -323,7 +312,7 @@ private:
     rclcpp::shutdown();
   }
 
-  video_pipeline::MediaDecoder decoder_;
+  std::unique_ptr<video_pipeline::H264DecoderStrategy> decoder_strategy_;
   video_pipeline::H264AnnexBParser bitstream_parser_;
   video_pipeline::ImageConverter converter_;
   std::unique_ptr<AVPacket, PacketDeleter> packet_;
