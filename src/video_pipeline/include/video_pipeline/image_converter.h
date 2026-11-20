@@ -18,9 +18,11 @@ public:
   ImageConverter(const ImageConverter &) = delete;
   ImageConverter & operator=(const ImageConverter &) = delete;
 
-  // 输出与输入等尺寸、指定像素格式的图像；两个帧均由调用者持有。
-  // 每次调用会先清空 output 中原有的数据。
-  int convert(const AVFrame * input, AVPixelFormat output_format, AVFrame * output);
+  // 目标宽高均为 0 时采用输入尺寸。输入帧和输出帧由调用者持有。
+  // 分配输出缓冲前会清空 output 中原有的数据。
+  int convert(
+    const AVFrame * input, AVPixelFormat output_format, AVFrame * output,
+    int output_width = 0, int output_height = 0);
 
 private:
   SwsContext * scale_context_;

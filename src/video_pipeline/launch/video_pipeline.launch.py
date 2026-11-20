@@ -21,6 +21,8 @@ def generate_launch_description():
         DeclareLaunchArgument('input_path', description='容器内的视频文件路径'),
         DeclareLaunchArgument('fps', default_value='30', description='发布和编码帧率，使用正整数'),
         DeclareLaunchArgument('bit_rate', default_value='2000000', description='编码目标码率，单位 bit/s'),
+        DeclareLaunchArgument('output_width', default_value='0', description='编码输出宽度，0 表示使用输入宽度'),
+        DeclareLaunchArgument('output_height', default_value='0', description='编码输出高度，0 表示使用输入高度'),
         DeclareLaunchArgument('with_audio', default_value='false', description='编码、解码和同步输入文件的音轨'),
         DeclareLaunchArgument('audio_bit_rate', default_value='64000', description='Opus 目标码率，单位 bit/s'),
         DeclareLaunchArgument(
@@ -49,6 +51,8 @@ def generate_launch_description():
             parameters=[{
                 'fps': ParameterValue(fps, value_type=int),
                 'bit_rate': ParameterValue(LaunchConfiguration('bit_rate'), value_type=int),
+                'output_width': ParameterValue(LaunchConfiguration('output_width'), value_type=int),
+                'output_height': ParameterValue(LaunchConfiguration('output_height'), value_type=int),
                 'adaptive_bit_rate': ParameterValue(
                     LaunchConfiguration('adaptive_bit_rate'), value_type=bool),
                 'queue_max_packets': ParameterValue(

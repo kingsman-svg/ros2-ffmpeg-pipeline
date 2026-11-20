@@ -33,6 +33,15 @@ ros2 launch video_pipeline video_pipeline.launch.py \
 
 `input_path` 必填。`fps` 是用于发布和编码的正整数帧率，默认 `30`。`bit_rate` 是编码目标码率，默认 `2000000` bit/s。文件源等图像、结束通知和 H.264 链路就绪后才开始发布。视频播完后，三个节点会依次排出缓冲数据并退出。
 
+默认按输入尺寸编码。可以在启动时同时指定 `output_width` 和 `output_height`，让编码节点在转换 YUV420P 时一并缩放。
+
+~~~bash
+ros2 launch video_pipeline video_pipeline.launch.py \
+  input_path:=/tmp/input.mp4 output_width:=1280 output_height:=720
+~~~
+
+两个参数默认都是 `0`，指定缩放时两项都必须是正偶数。两个值就是目标尺寸，按原画面宽高比选择目标值可避免拉伸。在 `/video/image_raw` 可查看输入尺寸，在 `/video/decoded_image` 可查看编码后解出的尺寸。
+
 ## 音频话题与音视频同步
 
 在现有 launch 上添加 `with_audio:=true`，从同一个文件读取视频和连续音轨。Opus 编码默认 64 kb/s，可通过 `audio_bit_rate` 设置。
@@ -99,7 +108,7 @@ source /workspaces/ros2/ffmpeg_pipline_ws/install/setup.bash
 ros2 run video_pipeline h264_encoder_node --ros-args -p fps:=10 -p bit_rate:=2000000
 ~~~
 
-编码端的 `fps` 使用整数，示例与视频发布端的 `10.0` 对应。`bit_rate` 单位为 bit/s。编码节点从 `/video/image_raw` 接收固定尺寸的 `rgb8` 图像，将其转为 YUV420P，再通过 `libx264` 编码。输入宽高均须为偶数。图像和编码包使用可靠 QoS。一次运行处理一个文件，编码端需要在源节点发布第一帧前完成订阅。
+编码端的 `fps` 使用整数，示例与视频发布端的 `10.0` 对应。`bit_rate` 单位为 bit/s。编码节点从 `/video/image_raw` 接收固定尺寸的 `rgb8` 图像，将其转为 YUV420P，再通过 `libx264` 编码。编码宽高均须为偶数，单独启动节点时可用 `-p output_width:=1280 -p output_height:=720` 指定。图像和编码包使用可靠 QoS。一次运行处理一个文件，编码端需要在源节点发布第一帧前完成订阅。
 
 发布期间，在另一个容器终端查看自定义消息、关键帧标记和带宽。
 

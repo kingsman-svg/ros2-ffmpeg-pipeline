@@ -20,7 +20,9 @@ ImageConverter::~ImageConverter()
   sws_freeContext(scale_context_);
 }
 
-int ImageConverter::convert(const AVFrame * input, AVPixelFormat output_format, AVFrame * output)
+int ImageConverter::convert(
+  const AVFrame * input, AVPixelFormat output_format, AVFrame * output,
+  int output_width, int output_height)
 {
   if (input == nullptr || output == nullptr || input == output ||
     input->width <= 0 || input->height <= 0 || input->format < 0 ||
@@ -31,19 +33,27 @@ int ImageConverter::convert(const AVFrame * input, AVPixelFormat output_format, 
     return AVERROR(EINVAL);
   }
 
-  // 输入尺寸或格式变化时，FFmpeg 会重新创建转换上下文。
+  if (output_width == 0 && output_height == 0) {
+    output_width = input->width;
+    output_height = input->height;
+  }
+  if (output_width <= 0 || output_height <= 0) {
+    return AVERROR(EINVAL);
+  }
+
+  // 一次转换同时处理像素格式和目标尺寸。
   scale_context_ = sws_getCachedContext(
     scale_context_, input->width, input->height,
     static_cast<AVPixelFormat>(input->format),
-    input->width, input->height, output_format,
+    output_width, output_height, output_format,
     SWS_BILINEAR, nullptr, nullptr, nullptr);
   if (scale_context_ == nullptr) {
     return AVERROR(EINVAL);
   }
 
   av_frame_unref(output);
-  output->width = input->width;
-  output->height = input->height;
+  output->width = output_width;
+  output->height = output_height;
   output->format = output_format;
 
   int result = av_frame_get_buffer(output, 32);
@@ -60,7 +70,7 @@ int ImageConverter::convert(const AVFrame * input, AVPixelFormat output_format, 
   result = sws_scale(
     scale_context_, input->data, input->linesize, 0, input->height,
     output->data, output->linesize);
-  if (result != input->height) {
+  if (result != output_height) {
     av_frame_unref(output);
     if (result < 0) {
       return result;

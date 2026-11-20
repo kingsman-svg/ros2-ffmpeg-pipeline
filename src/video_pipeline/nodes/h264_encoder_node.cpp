@@ -85,6 +85,25 @@ public:
       throw std::invalid_argument("fps 必须是有效的正整数，bit_rate 必须大于 0");
     }
     encoder_config_.frames_per_second = static_cast<int>(fps);
+
+    const auto output_width = declare_parameter<std::int64_t>("output_width", 0, startup_parameter);
+    const auto output_height = declare_parameter<std::int64_t>("output_height", 0, startup_parameter);
+    if (output_width != 0 || output_height != 0) {
+      if (output_width <= 0 || output_height <= 0 ||
+        output_width > std::numeric_limits<int>::max() ||
+        output_height > std::numeric_limits<int>::max() ||
+        output_width % 2 != 0 || output_height % 2 != 0)
+      {
+        throw std::invalid_argument("output_width 和 output_height 必须同时为 0 或有效的正偶数");
+      }
+      encoder_config_.width = static_cast<int>(output_width);
+      encoder_config_.height = static_cast<int>(output_height);
+      const int result = av_image_check_size(encoder_config_.width, encoder_config_.height, 0, nullptr);
+      if (result < 0) {
+        throw ffmpeg_error("检查输出图像尺寸失败", result);
+      }
+    }
+
     encoder_config_.gop_size = encoder_config_.frames_per_second;
     encoder_config_.encoder_name = "libx264";
     encoder_config_.tune = "zerolatency";
@@ -335,15 +354,17 @@ private:
     if (result < 0) {
       throw ffmpeg_error("检查输入图像尺寸失败", result);
     }
-    if (image.width % 2 != 0 || image.height % 2 != 0) {
-      throw std::invalid_argument("YUV420P 编码要求图像宽高均为偶数");
+    rgb_frame_->format = AV_PIX_FMT_RGB24;
+    rgb_frame_->width = static_cast<int>(image.width);
+    rgb_frame_->height = static_cast<int>(image.height);
+    if (encoder_config_.width == 0) {
+      encoder_config_.width = rgb_frame_->width;
+      encoder_config_.height = rgb_frame_->height;
+    }
+    if (encoder_config_.width % 2 != 0 || encoder_config_.height % 2 != 0) {
+      throw std::invalid_argument("YUV420P 编码要求输出宽高均为偶数");
     }
 
-    encoder_config_.width = static_cast<int>(image.width);
-    encoder_config_.height = static_cast<int>(image.height);
-    rgb_frame_->format = AV_PIX_FMT_RGB24;
-    rgb_frame_->width = encoder_config_.width;
-    rgb_frame_->height = encoder_config_.height;
     const int buffer_result = av_frame_get_buffer(rgb_frame_.get(), 32);
     if (buffer_result < 0) {
       throw ffmpeg_error("分配 RGB 输入缓冲失败", buffer_result);
@@ -353,8 +374,9 @@ private:
       throw ffmpeg_error("打开 H.264 编码器失败", open_result);
     }
     RCLCPP_INFO_STREAM(
-      get_logger(), "开始编码 " << image.width << "x" << image.height << "，"
-                                 << encoder_config_.frames_per_second << " fps");
+      get_logger(), "开始编码，输入 " << rgb_frame_->width << "x" << rgb_frame_->height
+                                    << "，输出 " << encoder_config_.width << "x" << encoder_config_.height
+                                    << "，" << encoder_config_.frames_per_second << " fps");
   }
 
   void encode_image(const Image & image)
@@ -369,8 +391,8 @@ private:
     if (next_pts_ == 0) {
       open_encoder(image);
     }
-    if (image.width != static_cast<std::uint32_t>(encoder_config_.width) ||
-      image.height != static_cast<std::uint32_t>(encoder_config_.height))
+    if (image.width != static_cast<std::uint32_t>(rgb_frame_->width) ||
+      image.height != static_cast<std::uint32_t>(rgb_frame_->height))
     {
       throw std::invalid_argument("同一视频流内的图像尺寸必须一致");
     }
@@ -382,7 +404,9 @@ private:
         static_cast<std::size_t>(row) * rgb_frame_->linesize[0];
       std::memcpy(destination, source, static_cast<std::size_t>(row_bytes));
     }
-    const int result = converter_.convert(rgb_frame_.get(), encoder_config_.pixel_format, yuv_frame_.get());
+    const int result = converter_.convert(
+      rgb_frame_.get(), encoder_config_.pixel_format, yuv_frame_.get(),
+      encoder_config_.width, encoder_config_.height);
     if (result < 0) {
       throw ffmpeg_error("转换 YUV420P 图像失败", result);
     }
