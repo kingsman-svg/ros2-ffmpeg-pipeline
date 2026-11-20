@@ -54,10 +54,27 @@ ros2 launch video_pipeline video_pipeline.launch.py \
 
 ~~~bash
 ros2 launch video_pipeline video_pipeline.launch.py \
-  input_path:=/tmp/input.mp4 encoder_backend:=nvenc adaptive_bit_rate:=false
+  input_path:=/tmp/input.mp4 encoder_backend:=nvenc decoder_backend:=software adaptive_bit_rate:=false
 ~~~
 
 编码节点收到首张图后会打印选中的后端。可从 `/video/decoded_image` 核对 NVENC 编码经软件解码后的图像。单独启动编码节点时，用 `--ros-args -p encoder_backend:=nvenc` 指定后端。
+
+### 选择 H.264 解码后端
+
+| `decoder_backend` | 启动行为 |
+|---|---|
+| `auto`（默认） | 尝试创建 CUDA 解码上下文。初始化失败或当前码流无法使用 CUDA 像素格式时回退到软件解码。 |
+| `software` | 使用 FFmpeg 的 H.264 软件解码。 |
+| `nvdec` | 要求使用 NVDEC 硬件解码，CUDA 初始化或像素格式协商失败时结束运行。 |
+
+在满足 NVIDIA 设备及驱动条件的环境中，可以用软件编码、硬件解码来验证解码后端。
+
+~~~bash
+ros2 launch video_pipeline video_pipeline.launch.py \
+  input_path:=/tmp/input.mp4 encoder_backend:=software decoder_backend:=nvdec
+~~~
+
+收到并下载首张 CUDA 解码帧后，节点会打印 `H.264 解码后端为 NVDEC (CUDA)`。输出仍在 `/video/decoded_image`，硬件帧会先回传 CPU 再转为 RGB。将示例中的 `encoder_backend` 换成 `nvenc` 可以验证硬编到硬解的链路。单独启动解码节点时，可用 `--ros-args -p decoder_backend:=nvdec` 指定后端。
 
 ## 音频话题与音视频同步
 

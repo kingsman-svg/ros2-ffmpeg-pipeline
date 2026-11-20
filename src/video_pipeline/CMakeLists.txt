@@ -21,6 +21,7 @@ add_library(ffmpeg_video STATIC
   src/video_encoder.cpp
   src/h264_decoder_strategy.cpp
   src/h264_encoder_strategy.cpp
+  src/nvdec_h264_decoder_strategy.cpp
   src/nvenc_h264_encoder_strategy.cpp
   src/image_converter.cpp
   src/audio_resampler.cpp

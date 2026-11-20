@@ -23,6 +23,8 @@ def generate_launch_description():
         DeclareLaunchArgument('bit_rate', default_value='2000000', description='编码目标码率，单位 bit/s'),
         DeclareLaunchArgument(
             'encoder_backend', default_value='auto', description='H.264 编码后端，auto、software 或 nvenc'),
+        DeclareLaunchArgument(
+            'decoder_backend', default_value='auto', description='H.264 解码后端，auto、software 或 nvdec'),
         DeclareLaunchArgument('output_width', default_value='0', description='编码输出宽度，0 表示使用输入宽度'),
         DeclareLaunchArgument('output_height', default_value='0', description='编码输出高度，0 表示使用输入高度'),
         DeclareLaunchArgument('with_audio', default_value='false', description='编码、解码和同步输入文件的音轨'),
@@ -40,6 +42,7 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'announce_ready': True,
+                'decoder_backend': ParameterValue(LaunchConfiguration('decoder_backend'), value_type=str),
                 'queue_max_packets': ParameterValue(
                     LaunchConfiguration('decode_queue_max_packets'), value_type=int),
                 'queue_max_bytes': ParameterValue(

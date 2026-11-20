@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
 
@@ -23,6 +24,7 @@
 #include "video_pipeline/h264_decoder_strategy.h"
 #include "video_pipeline/h264_packet_queue.h"
 #include "video_pipeline/image_converter.h"
+#include "video_pipeline/nvdec_h264_decoder_strategy.h"
 #include "video_pipeline/rgb_image_message.h"
 #include "video_pipeline_msgs/msg/h264_packet.hpp"
 #include "video_pipeline_msgs/msg/h264_queue_feedback.hpp"
@@ -57,8 +59,8 @@ class H264DecoderNode : public rclcpp::Node
 {
 public:
   H264DecoderNode()
-  : Node("h264_decoder"), decoder_strategy_(new video_pipeline::SoftwareH264DecoderStrategy()),
-    packet_(av_packet_alloc()), decoded_frame_(av_frame_alloc()), rgb_frame_(av_frame_alloc())
+  : Node("h264_decoder"), packet_(av_packet_alloc()), decoded_frame_(av_frame_alloc()),
+    rgb_frame_(av_frame_alloc())
   {
     if (!packet_ || !decoded_frame_ || !rgb_frame_) {
       throw std::runtime_error("分配解码数据结构失败");
@@ -66,14 +68,15 @@ public:
 
     rcl_interfaces::msg::ParameterDescriptor startup_parameter;
     startup_parameter.read_only = true;
+    const auto backend = declare_parameter<std::string>("decoder_backend", "auto", startup_parameter);
+    if (backend != "auto" && backend != "software" && backend != "nvdec") {
+      throw std::invalid_argument("decoder_backend 必须是 auto、software 或 nvdec");
+    }
     const auto max_packets = declare_parameter<std::int64_t>("queue_max_packets", 120, startup_parameter);
     const auto max_bytes = declare_parameter<std::int64_t>("queue_max_bytes", 8 * 1024 * 1024, startup_parameter);
     decode_queue_ = std::make_unique<H264PacketQueue>("H.264 解码队列", max_packets, max_bytes);
 
-    const int result = decoder_strategy_->open();
-    if (result < 0) {
-      throw ffmpeg_error("打开 H.264 解码器失败", result);
-    }
+    open_decoder_strategy(backend);
 
     publisher_ = create_publisher<Image>("video/decoded_image", rclcpp::QoS(30));
     subscription_ = create_subscription<H264Packet>(
@@ -132,6 +135,30 @@ public:
   }
 
 private:
+  void open_decoder_strategy(const std::string & backend)
+  {
+    if (backend != "software") {
+      decoder_strategy_.reset(new video_pipeline::NvdecH264DecoderStrategy(backend == "auto"));
+      const int result = decoder_strategy_->open();
+      if (result >= 0) {
+        RCLCPP_INFO(get_logger(), "NVDEC 的 CUDA 解码上下文已就绪，等待首帧");
+        return;
+      }
+      const auto error = ffmpeg_error("打开 NVDEC 解码器失败", result);
+      if (backend == "nvdec") {
+        throw error;
+      }
+      RCLCPP_WARN_STREAM(get_logger(), error.what() << "，回退到软件解码");
+    }
+
+    decoder_strategy_.reset(new video_pipeline::SoftwareH264DecoderStrategy());
+    const int result = decoder_strategy_->open();
+    if (result < 0) {
+      throw ffmpeg_error("打开 H.264 软件解码器失败", result);
+    }
+    RCLCPP_INFO(get_logger(), "H.264 解码后端为软件解码");
+  }
+
   void publish_queue_feedback()
   {
     DecodeStageStats stage_stats;
